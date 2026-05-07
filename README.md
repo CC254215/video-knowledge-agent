@@ -1,19 +1,102 @@
-﻿# Video Knowledge Agent MVP
+﻿# Video Knowledge Agent
 
-Video Knowledge Agent 鏄竴涓湰鍦颁紭鍏堢殑瑙嗛鐭ヨ瘑 Agent銆傚畠涓嶆槸鏅€氳棰戞憳瑕佸伐鍏凤紝鑰屾槸鎶婅棰戝鐞嗘垚鍙拷婧€佸彲闂瓟銆佸彲瀵煎嚭鍒?Obsidian 鐨勭煡璇嗚瘉鎹€?
-褰撳墠闃舵涓婚摼璺彧浣跨敤涓夌被璇佹嵁锛?
-- `speech`锛氬瓧骞曟垨 ASR 鍙拌瘝鏂囨湰
-- `frame`锛氬叧閿抚鍥剧墖
-- `frame_caption`锛氬叧閿抚瑙嗚鎻忚堪
+**English:** A local-first pipeline that turns long-form video into structured, citeable knowledge: multimodal segments, summaries, query-guided storylines, hybrid retrieval, and grounded Q&A—without treating the project as a generic “video summarizer.”
 
-OCR 宸叉殏鏃剁鐢ㄣ€?
-## 涓诲叆鍙?
-鏈湴 Web UI锛?
+**中文：** 本地优先的视频知识化 Agent：将视频处理为可追溯的多模态证据、摘要与叙事线，支持向量检索与有据可依的问答；当前阶段以 **`speech`（字幕/ASR）**、**`frame`（关键帧）**、**`frame_caption`（视觉描述）** 三类证据为主，**OCR 已按策略关闭**。
+
+---
+
+## Table of contents
+
+- [Capabilities](#capabilities)
+- [Architecture snapshot](#architecture-snapshot)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [Typical workflows](#typical-workflows)
+- [Optional integrations](#optional-integrations)
+- [Artifacts & data layout](#artifacts--data-layout)
+- [Throughput, retries & resume](#throughput-retries--resume)
+- [Verification & diagnostics](#verification--diagnostics)
+- [Development](#development)
+- [Limitations](#limitations)
+- [Repository layout](#repository-layout)
+
+---
+
+## Capabilities
+
+| Area | What you get |
+|------|----------------|
+| **Ingestion** | Public URLs (via yt-dlp), local video/audio files; metadata and transcript-first strategy with optional **local ASR** (`faster-whisper`, optional extra). |
+| **Multimodal evidence** | Segment-aligned speech, representative frames, VLM captions; deduping and modality routing; artifacts persisted under `data/videos/{video_id}/`. |
+| **Understanding** | LLM summaries (incl. map–reduce for long videos), 30s overview, structured outline, query-guided **Storyline** with grounded node checks. |
+| **Retrieval** | ChromaDB persistent store (default under `data/chroma/`), hybrid / DPP-style evidence selection, agreement signals for confidence. |
+| **Interfaces** | **Gradio** Web UI (`cli.py`), **Typer** CLI (`app.cli` / `src.cli` shim), **FastAPI** server (`api.py`). |
+
+---
+
+## Architecture snapshot
+
+```text
+URL / file → ingest (yt-dlp + ffmpeg) → transcript & segments
+    → keyframes + VLM captions → multimodal_segments.json
+    → embed & index (Chroma) → summary + storyline
+    → QA / chat (evidence-bound answers)
+```
+
+Design principle: **answers must be supported by on-video evidence**; when evidence is insufficient, the system should state that explicitly rather than inventing facts.
+
+---
+
+## Requirements
+
+- **Python** 3.11+（若系统默认 `python` 指向 3.10，请使用 `py -3.11`。）
+- **ffmpeg** 在 `PATH` 中（真实 URL 下载与音视频处理依赖）。
+- **yt-dlp**（已列入 `pyproject.toml` 依赖，随项目安装即可；命令行工具亦可单独维护）。
+- **可选：** `faster-whisper`（无字幕时的本地 ASR）：`pip install -e ".[asr]"`。
+
+项目若存在本地 ffmpeg  bundle，可将二进制置于例如：
+
+```text
+<project_root>/tools/ffmpeg/bin
+```
+
+并将该路径加入 `PATH`（与旧版说明一致，便于 Windows 下一键就绪）。
+
+---
+
+## Installation
+
+```powershell
+cd <project_root>
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+py -3.11 -m pip install -U pip
+py -3.11 -m pip install -e .
+# 可选：本地 ASR
+py -3.11 -m pip install -e ".[asr]"
+# 可选：跑测试
+py -3.11 -m pip install -e ".[dev]"
+```
+
+安装后可使用控制台入口（见 `pyproject.toml`）：
+
+- `vka` → Typer CLI（`app.cli`）
+- `vka-api` → HTTP API（`api.main`）
+
+---
+
+## Quick start
+
+### Web UI（Gradio）
+
 ```powershell
 py -3.11 cli.py
 ```
 
-鍙€夊弬鏁帮細
+常用参数：
 
 ```powershell
 py -3.11 cli.py --port 7861
@@ -21,41 +104,48 @@ py -3.11 cli.py --share
 py -3.11 cli.py --debug
 ```
 
-榛樿鍦板潃锛?
-```text
-http://127.0.0.1:7860
-```
+默认地址：`http://127.0.0.1:7860`
 
-寮€鍙戣皟璇?CLI 浠嶇劧淇濈暀锛?
+### HTTP API（FastAPI / Uvicorn）
+
 ```powershell
-py -3.11 -m src.cli process --url "<video_url>" --no-ocr --strict-llm
-py -3.11 -m src.cli ask --video-id "<video_id>" --question "杩欎釜瑙嗛鏍稿績瑙傜偣鏄粈涔堬紵"
-py -3.11 -m src.cli rebuild-index --video-id "<video_id>"
-py -3.11 -m src.cli refine-frames --video-id "<video_id>" --start 600 --end 720
+py -3.11 api.py --host 127.0.0.1 --port 8000
 ```
 
-## 鐜瑕佹眰
+或使用：`vka-api --port 8000`
 
-- Python 3.11+
-- ffmpeg 蹇呴』瀹夎骞跺姞鍏?PATH锛岀湡瀹?URL 澶勭悊渚濊禆瀹冧笅杞藉拰鍚堝苟瑙嗛/闊抽
-- yt-dlp
-- 鍙€夛細faster-whisper锛岀敤浜庢棤瀛楀箷瑙嗛 ASR
+### CLI（Typer）
 
-鏈」鐩篃浼氳嚜鍔ㄨ瘑鍒」鐩唴缃矾寰勶細
+`python -m app.cli` 与 `python -m src.cli` 等价（`src.cli` 为薄封装）。
 
-```text
-D:\video_knowledge_agent\tools\ffmpeg\bin
-```
+示例：
 
-瀹夎渚濊禆锛?
 ```powershell
-py -3.11 -m pip install -e .
+py -3.11 -m app.cli process --url "<video_url>" --no-ocr --strict-llm
+py -3.11 -m app.cli ask --video-id "<video_id>" --question "视频的核心论点是什么？"
+py -3.11 -m app.cli rebuild-index --video-id "<video_id>"
+py -3.11 -m app.cli refine-frames --video-id "<video_id>" --start 600 --end 720
+py -3.11 -m app.cli show-config
 ```
 
-娉ㄦ剰锛氬鏋滅郴缁熼粯璁?`python` 鎸囧悜 Python 3.10锛岃浣跨敤 `py -3.11` 杩愯鏈」鐩€?
-## .env 閰嶇疆
+`process` 支持本地文件：`--file path\to\video.mp4`；更多标志见 `py -3.11 -m app.cli process --help`。
 
-鎺ㄨ崘閰嶇疆锛?
+---
+
+## Configuration
+
+1. 复制环境变量模板：
+
+   ```powershell
+   copy .env.example .env
+   ```
+
+2. 在 `.env` 中填写 **LLM / VLM / Embedding** 的供应商 URL、模型名与密钥；**切勿**将 `.env` 提交到版本库。
+
+3. 完整键名与默认值以 **`.env.example`** 为准（项目迭代时以仓库内文件为单一事实来源）。
+
+**推荐起步配置示例（智谱 BigModel，可按需替换）：**
+
 ```env
 LLM_PROVIDER=zhipu
 LLM_API_KEY=${ZHIPU_API_KEY}
@@ -71,24 +161,69 @@ EMBEDDING_BASE_URL=https://open.bigmodel.cn/api/paas/v4
 EMBEDDING_MODEL=Embedding-3
 
 DATA_DIR=./data
-OBSIDIAN_VAULT_PATH=
 ASR_MODEL=small
 
 ENABLE_OCR=false
 EVIDENCE_TYPES=speech,frame,frame_caption
-STRICT_LLM=false
 ALLOW_CODING_ENDPOINT_FOR_RUNTIME=false
 REQUEST_TIMEOUT_SECONDS=600
+```
+
+**Runtime / Storyline 摘要相关（可按需调优）：**
+
+```env
+STRICT_LLM=false
 SUMMARY_MAX_SEGMENTS=24
 SUMMARY_SEGMENT_CHARS=500
 SUMMARY_CAPTION_CHARS=300
 STORYLINE_TOP_K=16
 ```
 
-## MemPalace MCP stdio 集成
+### LLM endpoint 安全提示
 
-当前 Agent 可以通过 MemPalace 原生 MCP server 与长期记忆系统通信。该集成默认关闭，不影响视频处理和问答主链路。
-`.env` 示例：
+- **不要**将面向「代码 / Coding」场景的 OpenAPI 端点用于本项目的运行时推理（例如包含 `coding` 路径的 URL）。
+- 若检测到 runtime LLM 指向 coding 端点，运行时会打印警告；设置 **`STRICT_LLM=true`**（或在 CLI 使用 `--strict-llm`）时可能直接失败退出，以避免误用。
+
+---
+
+## Typical workflows
+
+### 处理公开 URL
+
+```powershell
+py -3.11 -m app.cli process --url "<公开视频_URL>" --no-ocr --strict-llm
+```
+
+成功时 CLI 会汇总管线状态、摘要生成状态、Chroma 索引统计、阶段耗时以及摘要 / Storyline 片段预览。
+
+### 单视频问答
+
+进程重启后如需仅重建向量索引：
+
+```powershell
+py -3.11 -m app.cli rebuild-index --video-id "<video_id>"
+py -3.11 -m app.cli ask --video-id "<video_id>" --question "……"
+```
+
+回答结构通常包含：`answer`、`evidence`、`timestamps`、`evidence_types`、`confidence`、`agreement_score`、`needs_visual_check`、`reason` 等（以当前模型与管线版本为准）。
+
+---
+
+## Optional integrations
+
+### Obsidian
+
+配置 **`OBSIDIAN_VAULT_PATH`** 后，处理完成可尝试导出（具体路径规则见实现与 `COMPLETED_FEATURES.md`），例如：
+
+- `10_Sources/Videos/{date} - {safe_title}.md`
+- `30_Storylines/{date} - {safe_title} - storyline.md`
+
+未配置 vault 时跳过导出，不阻塞主流程。
+
+### MemPalace（MCP stdio）
+
+默认关闭。启用后与 MemPalace MCP server 通信，用于**长期记忆补充**，不替代视频证据。
+
 ```env
 MEMPALACE_PROVIDER=mcp_stdio
 MEMPALACE_COMMAND=python
@@ -98,71 +233,28 @@ MEMPALACE_TIMEOUT_SECONDS=30
 MEMPALACE_AUTO_STATUS=true
 ```
 
-如果需要指定 palace 路径：
-```env
-MEMPALACE_PALACE_PATH=D:\path\to\palace
-```
+调试示例：
 
-调试命令：
 ```powershell
 py -3.11 scripts\smoke_test_mempalace_mcp.py
 py -3.11 -m app.cli mempalace-status
 py -3.11 -m app.cli mempalace-search "agent memory"
 ```
 
-使用边界：
-- 当前视频事实仍必须由 `speech` / `frame` / `frame_caption` 证据支持。
-- MemPalace 只作为长期上下文、用户偏好、历史洞察补充。
-- MemPalace 检索结果会被结构化为 `long_term_memory`，不会直接拼接成视频证据。
+边界：**视频事实仍须由 `speech` / `frame` / `frame_caption` 支持**；MemPalace 结果以结构化 **`long_term_memory`** 等形式注入上下文，不会冒充视频内证据。
 
-鏅€氳棰戞憳瑕佸拰 Storyline 涓嶅簲浣跨敤锛?
-```text
-https://open.bigmodel.cn/api/coding/paas/v4
-```
+---
 
-濡傛灉妫€娴嬪埌 runtime LLM 浣跨敤 coding endpoint锛岀郴缁熶細鎵撳嵃寮鸿鍛婏紱`STRICT_LLM=true` 鏃朵細鐩存帴閫€鍑恒€?
-## 閰嶇疆妫€鏌ヤ笌 Smoke Test
+## Artifacts & data layout
 
-妫€鏌ュ綋鍓嶅疄闄呰鍙栧埌鐨勯厤缃細
-
-```powershell
-py -3.11 scripts\check_runtime_config.py
-```
-
-娴嬭瘯鏂囨湰鎽樿妯″瀷锛?
-```powershell
-py -3.11 scripts\smoke_test_llm.py
-```
-
-娴嬭瘯瑙嗚 caption 妯″瀷锛?
-```powershell
-py -3.11 scripts\smoke_test_vlm.py
-```
-
-杩欎簺鑴氭湰浼氭墦鍗?provider銆乥ase URL銆乵odel銆丠TTP status 鍜屽搷搴旀鏂囷紝浣嗕笉浼氭墦鍗?API key銆?
-## 澶勭悊鐪熷疄 URL
-
-```powershell
-py -3.11 -m src.cli process --url "<鍏紑瑙嗛 URL>" --no-ocr --strict-llm
-```
-
-鎴愬姛鏃惰緭鍑哄寘鍚細
-
-- Pipeline Status
-- LLM Summary: success
-- Evidence Mode: speech + frame_caption, OCR disabled
-- ChromaDB indexed: speech=N, frame_caption=M
-- 30 绉掗€熻
-- Structured Outline
-- Query-Guided Storyline
-
-杈撳嚭鏂囦欢淇濆瓨鍦細
+处理产物默认位于：
 
 ```text
 data/videos/{video_id}/
 ```
 
-鏍稿績鏂囦欢锛?
+常见核心文件包括：
+
 - `metadata.json`
 - `transcript.json`
 - `multimodal_segments.json`
@@ -170,48 +262,13 @@ data/videos/{video_id}/
 - `storyline.json`
 - `llm_logs/`
 
-## 鍗曡棰戦棶绛?
-濡傛灉杩涚▼閲嶅惎锛屽厛閲嶅缓鍐呭瓨鍚戦噺绱㈠紩锛?
-```powershell
-py -3.11 -m src.cli rebuild-index --video-id "<video_id>"
-```
+向量库默认持久化目录可参考 `.env` 中的 **`CHROMA_PATH`**（示例中为 `./data/chroma`）。
 
-鐒跺悗鎻愰棶锛?
-```powershell
-py -3.11 -m src.cli ask --video-id "<video_id>" --question "杩欎釜瑙嗛鏍稿績瑙傜偣鏄粈涔堬紵"
-```
+---
 
-鍥炵瓟蹇呴』鍖呭惈锛?
-- answer
-- evidence
-- timestamps
-- evidence_types
-- confidence
-- agreement_score
-- needs_visual_check
-- reason
+## Throughput, retries & resume
 
-璇佹嵁涓嶈冻鏃讹紝Agent 蹇呴』鏄庣‘璇存槑褰撳墠瑙嗛璇佹嵁涓嶈冻锛屼笉鑳界紪閫犮€?
-## Obsidian 瀵煎嚭
-
-閰嶇疆 `OBSIDIAN_VAULT_PATH` 鍚庯紝澶勭悊瀹屾垚浼氬皾璇曞鍑猴細
-
-- `10_Sources/Videos/{date} - {safe_title}.md`
-- `30_Storylines/{date} - {safe_title} - storyline.md`
-
-濡傛灉鏈厤缃?vault锛岀郴缁熶細璺宠繃瀵煎嚭锛屼笉闃诲涓绘祦绋嬨€?
-## 褰撳墠闄愬埗
-
-- 骞冲彴鏀寔渚濊禆 yt-dlp锛岀綉绔欑瓥鐣ュ彉鍖栧彲鑳藉鑷村け鏁堛€?- 鐪熷疄 URL 澶勭悊闇€瑕?ffmpeg 鍦?PATH 涓彲鐢ㄣ€?- 绗竴鐗堣瑙夌悊瑙ｅ彧浣跨敤鍏抽敭甯?caption锛屼笉鍋氬畬鏁村妯℃€佽瑙夋帹鐞嗐€?- OCR 褰撳墠绂佺敤銆?- ASR 璐ㄩ噺渚濊禆鏈湴妯″瀷鍜岄煶棰戣川閲忋€?- ChromaDB 褰撳墠浣跨敤 persistent collection锛岄粯璁よ矾寰?`data/chroma/`锛沗rebuild-index` 浠嶄繚鐣欑敤浜庝粠 JSON 閲嶅缓绱㈠紩銆?- DPP 鏄瘉鎹€夋嫨鍜屼竴鑷存€т俊鍙凤紝涓嶆槸鐪熶吉璇佹槑銆?
-## Rate Limit 涓庢柇鐐规仮澶?
-褰撳墠 pipeline 淇濈暀 summary銆乻toryline銆乂LM caption 绛夊唴閮ㄥ苟琛岋紝浣嗘墍鏈夊閮ㄤ緷璧栬姹傞兘浼氱粡杩囧垎璧勬簮璋冨害鍣細
-
-- `llm`锛氭枃鏈憳瑕併€丼toryline銆侀棶绛旂敓鎴?- `vlm`锛氬叧閿抚 caption
-- `embedding`锛氬悜閲忓寲
-- `ytdlp`锛氳棰戠綉绔?metadata銆佸瓧骞曘€侀煶瑙嗛涓嬭浇
-- `asr`锛氫簯绔?ASR 鎺ュ彛锛屾湰鍦?faster-whisper 涓嶈蛋 API 闄愭祦
-
-鍙湪 `.env` 涓皟鑺傦細
+对外部依赖的请求（LLM、VLM、Embedding、yt-dlp、云 ASR 等）由调度参数限制并发与最小间隔，可在 `.env` 中调节，例如：
 
 ```env
 LLM_MAX_CONCURRENCY=2
@@ -230,22 +287,62 @@ PIPELINE_RESUME=true
 PIPELINE_FORCE_STAGE=
 ```
 
-姣忎釜瑙嗛鐩綍浼氬啓鍏?`processing_state.json`銆傞噸鏂拌繍琛?`process` 鏃堕粯璁よ烦杩囧凡鎴愬姛涓斾骇鐗╁瓨鍦ㄧ殑闃舵锛?
-```powershell
-py -3.11 -m app.cli process --url "<video_url>"
-```
+每个视频目录会维护 **`processing_state.json`**。再次运行 `process` 时，默认跳过已成功且产物存在的阶段；需要全量重跑可使用 `--force-refresh`，或：
 
-寮哄埗鍏ㄩ儴閲嶈窇锛?
 ```powershell
 py -3.11 -m app.cli process --url "<video_url>" --force-refresh
-```
-
-鍙噸璺戞煇涓€闃舵锛?
-```powershell
 py -3.11 -m app.cli process --url "<video_url>" --force-stage summary
-```
-
-绂佺敤鏂偣鎭㈠锛?
-```powershell
 py -3.11 -m app.cli process --url "<video_url>" --no-resume
 ```
+
+---
+
+## Verification & diagnostics
+
+| 目的 | 命令 |
+|------|------|
+| 检查当前解析到的运行时配置 | `py -3.11 scripts\check_runtime_config.py` |
+| 文本摘要模型冒烟 | `py -3.11 scripts\smoke_test_llm.py` |
+| 视觉 caption 模型冒烟 | `py -3.11 scripts\smoke_test_vlm.py` |
+
+上述脚本会输出 provider、base URL、model、HTTP 状态与响应正文片段，**不会打印 API key**。
+
+---
+
+## Development
+
+```powershell
+py -3.11 -m pytest
+```
+
+测试配置见 `pyproject.toml` 中 `[tool.pytest.ini_options]`；功能清单见 **`COMPLETED_FEATURES.md`**。
+
+---
+
+## Limitations
+
+- **平台与站点策略**：下载成功率依赖 yt-dlp 与各站点策略变更。
+- **ffmpeg**：真实 URL 与转码路径依赖本机 ffmpeg 可用。
+- **视觉理解**：当前阶段以关键帧 + caption 为主，非完整像素级视频理解。
+- **OCR**：按策略关闭；启用需依赖可选组件并自行评估成本与效果。
+- **ASR 质量**：本地模型与音源质量直接影响转写效果。
+- **向量库**：持久化路径需自行备份；重建索引仍可从 JSON 等产物恢复索引内容（参见 `rebuild-index`）。
+
+---
+
+## Repository layout
+
+| Path | Role |
+|------|------|
+| `app/` | 主包：配置、管线、检索、推理、UI、API、vision、storage 等 |
+| `src/` | `python -m src.cli` 入口封装，转发至 `app.cli` |
+| `cli.py` | 启动 Gradio Web UI |
+| `api.py` | 启动 FastAPI 应用 |
+| `scripts/` | 配置检查与冒烟脚本 |
+| `tests/` | Pytest 用例 |
+
+---
+
+## Version
+
+当前包版本见 `pyproject.toml` 中 `version`（例如 `0.1.0`）。
