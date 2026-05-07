@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "video-knowledge-agent"
+version = "0.1.0"
+description = "Local-first Video Knowledge Agent MVP with traceable evidence notes and QA."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.7",
+  "pydantic-settings>=2.2",
+  "python-dotenv>=1.0",
+  "typer>=0.12",
+  "rich>=13.7",
+  "httpx>=0.27",
+  "imageio-ffmpeg>=0.6",
+  "yt-dlp>=2024.8.6",
+  "numpy>=1.26",
+  "scikit-learn>=1.4",
+  "chromadb>=0.5",
+  "gradio>=5.0",
+  "fastapi>=0.110",
+  "uvicorn>=0.29",
+]
+
+[project.optional-dependencies]
+asr = ["faster-whisper>=1.0"]
+chroma = ["chromadb>=0.5"]
+ocr = ["pillow>=10.0", "pytesseract>=0.3.10"]
+easyocr = ["easyocr>=1.7"]
+dev = ["pytest>=8.2"]
+
+[project.scripts]
+vka = "app.cli:app"
+vka-api = "api:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
