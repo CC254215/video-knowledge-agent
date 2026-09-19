@@ -101,6 +101,8 @@ def _documents_for_segments(video_id: str, segments: list[MultimodalSegment]) ->
                 "end": segment.end,
                 "evidence_type": "speech",
                 "modality": "speech",
+                "raw_text": segment.raw_transcript_text or segment.transcript_text,
+                "normalized_text": segment.normalized_transcript_text or segment.transcript_text,
             }
             rows.append(
                 BM25Document(
@@ -162,4 +164,6 @@ def _result_from_document(video_id: str, document: BM25Document, score: float) -
         image_path=metadata.get("image_path"),
         timestamp=float(metadata["timestamp"]) if metadata.get("timestamp") is not None else None,
         score=max(0.0, min(1.0, score)),
+        raw_text=metadata.get("raw_text"),
+        normalized_text=metadata.get("normalized_text") or document.document,
     )

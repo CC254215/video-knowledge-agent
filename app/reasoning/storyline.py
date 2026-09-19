@@ -14,6 +14,8 @@ from app.retrieval.chroma_memory import ChromaMemoryStore
 DEFAULT_STORYLINE_QUERY = "这个视频中有哪些对用户长期知识库有价值的观点、方法、事实、反驳和行动建议？"
 BAD_TITLE_WORDS = {"brooks", "stop", "buy", "sell", "他们", "下一根", "这个", "然后"}
 VISUAL_TERMS = ("图中显示", "K线突破", "箭头", "止损线", "跳空", "图表", "画面")
+STORYLINE_MAX_EVIDENCE = 24
+STORYLINE_MAX_UNCOVERED_GAP_SECONDS = 60.0
 
 
 def build_storyline_from_segments(video_id: str, segments: list[TranscriptSegment], query: str | None = None) -> Storyline:
@@ -41,6 +43,14 @@ def build_storyline_from_multimodal_segments(
             payload = client.generate_json(_storyline_prompt(video_id, metadata, evidence, effective_query), _schema_hint())
             storyline = _coerce_llm_storyline(video_id, segments, effective_query, payload)
             _validate_storyline_nodes(storyline, segments)
+            _backfill_storyline_gaps(
+                storyline,
+                segments,
+                client=client,
+                metadata=metadata,
+                query=effective_query,
+                max_gap_seconds=STORYLINE_MAX_UNCOVERED_GAP_SECONDS,
+            )
             return storyline
         except Exception as exc:  # noqa: BLE001
             if settings.strict_runtime or settings.strict_llm:
@@ -75,16 +85,17 @@ def load_storyline(path: Path) -> Storyline:
 
 def _retrieve_storyline_evidence(video_id: str, segments: list[MultimodalSegment], query: str, settings: Settings) -> list[RetrievedEvidence]:
     store = ChromaMemoryStore(settings)
+    evidence_budget = min(len(segments), max(int(settings.storyline_top_k), STORYLINE_MAX_EVIDENCE))
     if not store.has_video_documents(video_id):
         store.add_multimodal_segments(video_id, segments)
     try:
-        evidence = store.search(video_id, query, top_k=settings.storyline_top_k, evidence_types=["speech", "frame_caption"])
+        evidence = store.search(video_id, query, top_k=evidence_budget, evidence_types=["speech", "frame_caption"])
     except Exception:  # noqa: BLE001
         evidence = []
     if evidence:
-        return _merge_time_coverage_evidence(video_id, segments, evidence, max_items=settings.storyline_top_k)
+        return _merge_time_coverage_evidence(video_id, segments, evidence, max_items=evidence_budget)
     rows: list[RetrievedEvidence] = []
-    for segment in _select_time_coverage_segments(segments, max_items=settings.storyline_top_k):
+    for segment in _select_time_coverage_segments(segments, max_items=evidence_budget):
         if segment.transcript_text.strip():
             rows.append(
                 RetrievedEvidence(
@@ -152,11 +163,15 @@ def _select_time_coverage_segments(segments: list[MultimodalSegment], max_items:
 
 
 def _storyline_prompt(video_id: str, metadata: VideoMetadata | None, evidence: list[RetrievedEvidence], query: str) -> str:
-    evidence_block = "\n\n".join(_format_evidence(item) for item in evidence[:8])
+    evidence_block = "\n\n".join(_format_evidence(item) for item in evidence)
     title = metadata.title if metadata else video_id
     return f"""
 你是 Video Knowledge Agent 的 Query-Guided Storyline 生成器。
-只基于 evidence 生成 4 到 7 个语义节点，不要复读 ASR 原文，不要编造。
+只基于 evidence 生成语义节点，不要复读 ASR 原文，不要编造。
+十分钟以上的视频通常生成 6 到 12 个按时间排序的节点；除非主题不可拆分，单个节点不要覆盖超过约三分钟。
+节点的 time_start 和 time_end 必须表达覆盖区间，而不是只给一个孤立时间点。
+必须覆盖 evidence 中所有有实质内容的时间段，不能因为 query 不相关就跳过中间或结尾事件；允许把连续的低信息片段合并到同一节点。
+输出节点的 evidence_refs 必须覆盖 evidence 中的 segment_id，不能只挑最相关的少数片段。
 节点要表达信息推进：问题 -> 机制/原因 -> 风险/方法 -> 结论。
 OCR 已禁用，只允许引用 speech、frame、frame_caption。
 
@@ -260,6 +275,130 @@ def _validate_storyline_nodes(storyline: Storyline, segments: list[MultimodalSeg
         if node.status == EvidenceStatus.supported and node.confidence < 0.75:
             node.status = EvidenceStatus.weakly_supported
     _fill_storyline_metadata(storyline)
+
+
+def _backfill_storyline_gaps(
+    storyline: Storyline,
+    segments: list[MultimodalSegment],
+    client: LLMClient,
+    metadata: VideoMetadata | None,
+    query: str,
+    max_gap_seconds: float,
+) -> None:
+    """Summarize material gaps with the same LLM logic as the main storyline."""
+    _split_noncontiguous_storyline_nodes(storyline, segments)
+    covered = {segment_id for node in storyline.nodes for segment_id in node.evidence_segment_ids}
+    ordered = sorted(segments, key=lambda item: (item.start, item.end))
+    missing_runs: list[list[MultimodalSegment]] = []
+    current: list[MultimodalSegment] = []
+    for segment in ordered:
+        if segment.segment_id in covered:
+            if current:
+                missing_runs.append(current)
+                current = []
+            continue
+        current.append(segment)
+    if current:
+        missing_runs.append(current)
+
+    backfill_warnings: list[str] = []
+    for run in missing_runs:
+        if not run or run[-1].end - run[0].start < max_gap_seconds:
+            continue
+        run_evidence = _evidence_for_segments(storyline.video_id, run)
+        if not run_evidence:
+            continue
+        try:
+            payload = client.generate_json(_storyline_prompt(storyline.video_id, metadata, run_evidence, query), _schema_hint())
+            generated = _coerce_llm_storyline(storyline.video_id, run, query, payload)
+            _validate_storyline_nodes(generated, run)
+            _split_noncontiguous_storyline_nodes(generated, run)
+        except Exception as exc:  # noqa: BLE001
+            backfill_warnings.append(f"coverage_gap_summary_failed:{run[0].segment_id}-{run[-1].segment_id}:{type(exc).__name__}")
+            continue
+        allowed = {item.segment_id for item in run}
+        added = 0
+        for node in generated.nodes:
+            node.evidence_segment_ids = [item for item in node.evidence_segment_ids if item in allowed]
+            if not node.evidence_segment_ids:
+                continue
+            node.speech_evidence_ids = [item for item in node.speech_evidence_ids if item in allowed]
+            node.time_start = max(run[0].start, min(node.time_start, run[-1].end))
+            node.time_end = max(node.time_start, min(node.time_end, run[-1].end))
+            node.node_id = f"coverage_{run[0].segment_id}_{added:02d}"
+            storyline.nodes.append(node)
+            added += 1
+        if added:
+            backfill_warnings.append(f"coverage_gap_backfilled:{run[0].segment_id}-{run[-1].segment_id}")
+        else:
+            backfill_warnings.append(f"coverage_gap_summary_empty:{run[0].segment_id}-{run[-1].segment_id}")
+    storyline.nodes.sort(key=lambda node: (node.time_start, node.time_end, node.node_id))
+    _fill_storyline_metadata(storyline)
+    storyline.validation_warnings.extend(backfill_warnings)
+
+
+def _evidence_for_segments(video_id: str, segments: list[MultimodalSegment]) -> list[RetrievedEvidence]:
+    evidence: list[RetrievedEvidence] = []
+    for segment in segments:
+        if segment.transcript_text.strip():
+            evidence.append(RetrievedEvidence(
+                evidence_id=f"{video_id}:{segment.segment_id}:speech",
+                video_id=video_id,
+                segment_id=segment.segment_id,
+                evidence_type="speech",
+                text=segment.transcript_text,
+                start=segment.start,
+                end=segment.end,
+                score=0.0,
+            ))
+    return evidence
+
+
+def _split_noncontiguous_storyline_nodes(storyline: Storyline, segments: list[MultimodalSegment]) -> None:
+    """Prevent a node with disjoint evidence from visually spanning a missing event."""
+    order = {segment.segment_id: index for index, segment in enumerate(sorted(segments, key=lambda item: item.start))}
+    by_id = {segment.segment_id: segment for segment in segments}
+    normalized: list[StorylineNode] = []
+    claimed: set[str] = set()
+    for node in sorted(storyline.nodes, key=lambda item: (item.time_start, item.time_end, item.node_id)):
+        ids = [item for item in node.evidence_segment_ids if item in order]
+        unique_ids = [item for item in ids if item not in claimed]
+        if ids and not unique_ids:
+            continue
+        if unique_ids != ids:
+            node = node.model_copy(update={
+                "evidence_segment_ids": unique_ids,
+                "speech_evidence_ids": [item for item in node.speech_evidence_ids if item in unique_ids],
+                "evidence_refs": [ref for ref in node.evidence_refs if ref.get("segment_id") in unique_ids],
+            })
+        claimed.update(unique_ids)
+        ids = unique_ids
+        if len(ids) <= 1:
+            if ids:
+                node = node.model_copy(update={"time_start": by_id[ids[0]].start, "time_end": by_id[ids[-1]].end})
+            normalized.append(node)
+            continue
+        ids = sorted(dict.fromkeys(ids), key=lambda item: order[item])
+        runs: list[list[str]] = [[ids[0]]]
+        for segment_id in ids[1:]:
+            if order[segment_id] == order[runs[-1][-1]] + 1:
+                runs[-1].append(segment_id)
+            else:
+                runs.append([segment_id])
+        if len(runs) == 1:
+            normalized.append(node.model_copy(update={"time_start": by_id[runs[0][0]].start, "time_end": by_id[runs[0][-1]].end}))
+            continue
+        for part_index, run_ids in enumerate(runs):
+            updates = {
+                "node_id": f"{node.node_id}_part{part_index + 1}",
+                "time_start": by_id[run_ids[0]].start,
+                "time_end": by_id[run_ids[-1]].end,
+                "evidence_segment_ids": run_ids,
+                "speech_evidence_ids": [item for item in node.speech_evidence_ids if item in run_ids],
+                "evidence_refs": [ref for ref in node.evidence_refs if ref.get("segment_id") in run_ids],
+            }
+            normalized.append(node.model_copy(update=updates))
+    storyline.nodes = normalized
 
 
 def _fallback_storyline(video_id: str, segments: list[MultimodalSegment], query: str | None) -> Storyline:

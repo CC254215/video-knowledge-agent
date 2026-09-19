@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from app.memory.mcp_stdio_client import MCPStdioClient, build_mempalace_args
@@ -54,7 +55,7 @@ while True:
 def test_mcp_stdio_client_lists_and_calls_tools(tmp_path: Path) -> None:
     server = tmp_path / "mock_mcp_server.py"
     server.write_text(MOCK_SERVER, encoding="utf-8")
-    client = MCPStdioClient(command="python", args=[str(server)], timeout_seconds=5)
+    client = MCPStdioClient(command=sys.executable, args=[str(server)], timeout_seconds=5, framing="headers")
     try:
         tools = client.list_tools()
         assert "mempalace_status" in {tool.name for tool in tools}
@@ -68,3 +69,15 @@ def test_build_mempalace_args_adds_palace_path() -> None:
     args = build_mempalace_args("-m mempalace.mcp_server", "D:/palace")
     assert args[:2] == ["-m", "mempalace.mcp_server"]
     assert args[-2:] == ["--palace", "D:/palace"]
+
+
+def test_native_ndjson_framing(tmp_path: Path) -> None:
+    server = tmp_path / "ndjson_server.py"
+    server.write_text('''import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" in request:
+        print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": {"ok": True}}), flush=True)
+''', encoding="utf-8")
+    with MCPStdioClient(command=sys.executable, args=[str(server)], timeout_seconds=5) as client:
+        assert client.call_tool("probe") == {"ok": True}

@@ -22,11 +22,16 @@ class _FallbackCollection:
 
 
 class ChromaMemoryStore:
-    def __init__(self, settings: Settings | None = None, allow_fallback: bool = True) -> None:
+    def __init__(self, settings: Settings | None = None, allow_fallback: bool = True, use_persistent: bool = True) -> None:
         self.settings = settings or get_settings()
         self.allow_fallback = allow_fallback
         self._collections: dict[str, Any] = {}
         self._fallback: dict[str, _FallbackCollection] = {}
+        if not use_persistent:
+            self.client = None
+            self.using_chroma = False
+            self._fallback_embedder = HashingFallbackEmbedder()
+            return
         try:
             import chromadb  # type: ignore
 
@@ -57,6 +62,14 @@ class ChromaMemoryStore:
         if self.using_chroma:
             collection = self.create_video_collection(video_id)
             all_rows = rows
+            current_ids = {row["id"] for row in rows}
+            try:
+                existing_ids = set(collection.get(where={"video_id": video_id}, include=[]).get("ids") or [])
+                stale_ids = sorted(existing_ids - current_ids)
+                if stale_ids:
+                    collection.delete(ids=stale_ids)
+            except Exception as exc:  # noqa: BLE001
+                raise ChromaMemoryError(f"embedding_unavailable: failed to synchronize Chroma documents: {exc}") from exc
             changed_rows = self._changed_rows(collection, rows)
             if not changed_rows:
                 return
@@ -76,12 +89,18 @@ class ChromaMemoryStore:
                     ids = [row["id"] for row in all_rows]
                     documents = [row["document"] for row in all_rows]
                     metadatas = [row["metadata"] for row in all_rows]
-                    embeddings = HashingFallbackEmbedder().embed_texts(documents)
+                    embeddings = self._embed(documents)
                     collection.upsert(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
                     return
                 raise ChromaMemoryError(f"embedding_unavailable: failed to add documents to Chroma: {exc}") from exc
             return
         collection = self.create_video_collection(video_id)
+        current_ids = {row["id"] for row in rows}
+        keep_indexes = [index for index, evidence_id in enumerate(collection.ids) if evidence_id in current_ids]
+        collection.ids = [collection.ids[index] for index in keep_indexes]
+        collection.documents = [collection.documents[index] for index in keep_indexes]
+        collection.metadatas = [collection.metadatas[index] for index in keep_indexes]
+        collection.embeddings = [collection.embeddings[index] for index in keep_indexes]
         existing = {evidence_id: index for index, evidence_id in enumerate(collection.ids)}
         new_documents = [row["document"] for row in rows]
         new_embeddings = self._embed(new_documents)
@@ -158,7 +177,7 @@ class ChromaMemoryStore:
         try:
             return embed_texts(texts, self.settings)
         except Exception as exc:  # noqa: BLE001
-            if self.allow_fallback:
+            if self.allow_fallback and not self.settings.has_embedding_config:
                 return self._fallback_embedder.embed_texts(texts) if hasattr(self, "_fallback_embedder") else HashingFallbackEmbedder().embed_texts(texts)
             raise ChromaMemoryError(f"embedding_unavailable: {exc}") from exc
 
@@ -191,6 +210,8 @@ def _documents_for_segments(video_id: str, segments: list[MultimodalSegment]) ->
                         "end": segment.end,
                         "evidence_type": "speech",
                         "modality": "speech",
+                        "raw_text": segment.raw_transcript_text or segment.transcript_text,
+                        "normalized_text": segment.normalized_transcript_text or segment.transcript_text,
                     },
                 }
             )
@@ -216,7 +237,18 @@ def _documents_for_segments(video_id: str, segments: list[MultimodalSegment]) ->
                     "metadata": metadata,
                 }
             )
-    return rows
+    # Overlapping/refined segments can legitimately reference the same frame.
+    # Chroma requires IDs to be unique within one upsert, so keep the first
+    # deterministic row for each evidence ID before embedding/upserting.
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        row_id = str(row["id"])
+        if row_id in seen:
+            continue
+        seen.add(row_id)
+        deduped.append(row)
+    return deduped
 
 
 def _results_from_chroma(video_id: str, result: dict[str, Any]) -> list[RetrievedEvidence]:
@@ -239,6 +271,8 @@ def _results_from_chroma(video_id: str, result: dict[str, Any]) -> list[Retrieve
                 image_path=metadata.get("image_path"),
                 timestamp=float(metadata["timestamp"]) if metadata.get("timestamp") is not None else None,
                 score=max(0.0, 1.0 - float(distance or 0.0)),
+                raw_text=metadata.get("raw_text"),
+                normalized_text=metadata.get("normalized_text") or str(document or ""),
             )
         )
     return rows
@@ -258,6 +292,8 @@ def _fallback_result(video_id: str, collection: _FallbackCollection, index: int,
         image_path=metadata.get("image_path"),
         timestamp=float(metadata["timestamp"]) if metadata.get("timestamp") is not None else None,
         score=score,
+        raw_text=metadata.get("raw_text"),
+        normalized_text=metadata.get("normalized_text") or collection.documents[index],
     )
 
 

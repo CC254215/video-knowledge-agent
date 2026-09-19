@@ -1,0 +1,313 @@
+[
+  {
+    "question": "01:20 时老师在做什么？",
+    "deterministic_context": {
+      "video_title": "Example video",
+      "video_duration": 180.0,
+      "has_real_speech": true,
+      "has_audio": true,
+      "choice_based": false,
+      "explicit_whole_video": false,
+      "choices": [],
+      "explicit_timestamps": [
+        {
+          "start": 80.0,
+          "end": 80.0,
+          "source_text": "01:20"
+        }
+      ],
+      "explicit_intervals": [],
+      "transcript_preview": "老师正在讲解课程内容。",
+      "rule_hints": {
+        "possible_temporal_relation": "none",
+        "explicit_visual_reference": false,
+        "explicit_speech_reference": false,
+        "confidence": "low"
+      }
+    },
+    "question_analysis": {
+      "task_type": "factual",
+      "temporal_scope": "point",
+      "temporal_relation": "none",
+      "answer_target": "what the teacher is doing at 01:20",
+      "content_modalities": [
+        "visual"
+      ],
+      "choice_based": false,
+      "reason": "The user asks for a specific factual action performed by the teacher at an explicitly given timestamp (01:20), which primarily relies on visual content.",
+      "analysis_method": "llm"
+    },
+    "evidence_plan": {
+      "required_modalities": [
+        "visual"
+      ],
+      "required_facts": [
+        {
+          "fact": "The action performed by the teacher at the 01:20 timestamp",
+          "modality": "visual"
+        }
+      ],
+      "decision_facts": [
+        "The specific action the teacher is performing at 01:20"
+      ],
+      "min_distinct_timestamps": 1,
+      "requires_temporal_order": false,
+      "requires_global_coverage": false,
+      "requires_visual_identity": false,
+      "human_readable_requirements": [
+        "Identify the visual action of the teacher at the specific timestamp of 01:20"
+      ],
+      "reason": "The question asks for a specific factual action at an explicit timestamp (01:20), which requires observing the visual content at that exact point in time.",
+      "planning_method": "llm"
+    }
+  },
+  {
+    "question": "老师是先介绍数据集还是先介绍优化器？",
+    "deterministic_context": {
+      "video_title": "Example video",
+      "video_duration": 180.0,
+      "has_real_speech": true,
+      "has_audio": true,
+      "choice_based": false,
+      "explicit_whole_video": false,
+      "choices": [],
+      "explicit_timestamps": [],
+      "explicit_intervals": [],
+      "transcript_preview": "老师先介绍数据集，稍后介绍优化器。",
+      "rule_hints": {
+        "possible_temporal_relation": "sequence",
+        "explicit_visual_reference": false,
+        "explicit_speech_reference": false,
+        "confidence": "low"
+      }
+    },
+    "question_analysis": {
+      "task_type": "factual",
+      "temporal_scope": "event_local",
+      "temporal_relation": "sequence",
+      "answer_target": "the order in which the teacher introduces the dataset and the optimizer",
+      "content_modalities": [
+        "speech"
+      ],
+      "choice_based": false,
+      "reason": "The user is asking about the chronological order of two specific events (introducing the dataset and introducing the optimizer), which requires identifying a sequence relation based on the speech content.",
+      "analysis_method": "llm"
+    },
+    "evidence_plan": {
+      "required_modalities": [
+        "speech"
+      ],
+      "required_facts": [
+        {
+          "fact": "The teacher introduces the dataset at a specific time",
+          "modality": "speech"
+        },
+        {
+          "fact": "The teacher introduces the optimizer at a specific time",
+          "modality": "speech"
+        }
+      ],
+      "decision_facts": [
+        "The chronological order of the teacher introducing the dataset and the teacher introducing the optimizer"
+      ],
+      "min_distinct_timestamps": 2,
+      "requires_temporal_order": true,
+      "requires_global_coverage": false,
+      "requires_visual_identity": false,
+      "human_readable_requirements": [
+        "Identify the timestamp when the teacher introduces the dataset via speech.",
+        "Identify the timestamp when the teacher introduces the optimizer via speech.",
+        "Compare the two timestamps to determine the chronological sequence."
+      ],
+      "reason": "To determine the sequence of two events, we must locate the specific moments in the speech where each topic is introduced, requiring at least two distinct timestamps to establish temporal order.",
+      "planning_method": "llm"
+    }
+  },
+  {
+    "question": "这个人先用手塑形还是先使用木板？",
+    "deterministic_context": {
+      "video_title": "Example video",
+      "video_duration": 180.0,
+      "has_real_speech": false,
+      "has_audio": false,
+      "choice_based": false,
+      "explicit_whole_video": false,
+      "choices": [],
+      "explicit_timestamps": [],
+      "explicit_intervals": [],
+      "transcript_preview": "",
+      "rule_hints": {
+        "possible_temporal_relation": "sequence",
+        "explicit_visual_reference": false,
+        "explicit_speech_reference": false,
+        "confidence": "low"
+      }
+    },
+    "question_analysis": {
+      "task_type": "factual",
+      "temporal_scope": "event_local",
+      "temporal_relation": "sequence",
+      "answer_target": "the chronological order of the person's actions (hand shaping vs. using a wooden board)",
+      "content_modalities": [
+        "visual"
+      ],
+      "choice_based": false,
+      "reason": "The question asks for the sequence of two specific visual actions, requiring a determination of which occurs first.",
+      "analysis_method": "llm"
+    },
+    "evidence_plan": {
+      "required_modalities": [
+        "visual"
+      ],
+      "required_facts": [
+        {
+          "fact": "The person uses their hands to shape the object at a specific time",
+          "modality": "visual"
+        },
+        {
+          "fact": "The person uses a wooden board at a specific time",
+          "modality": "visual"
+        }
+      ],
+      "decision_facts": [
+        "The chronological order of the person using their hands to shape the object and the person using a wooden board"
+      ],
+      "min_distinct_timestamps": 2,
+      "requires_temporal_order": true,
+      "requires_global_coverage": false,
+      "requires_visual_identity": false,
+      "human_readable_requirements": [
+        "Identify the timestamp when the person uses hands for shaping",
+        "Identify the timestamp when the person uses a wooden board",
+        "Compare the timestamps to determine which action occurs first"
+      ],
+      "reason": "The question asks for the sequence of two specific actions (hand shaping vs. using a wooden board). To determine the order, we must observe the occurrence of both actions at distinct times in the video and compare their temporal positions.",
+      "planning_method": "llm"
+    }
+  },
+  {
+    "question": "Explain the process of backpropagation.",
+    "deterministic_context": {
+      "video_title": "Example video",
+      "video_duration": 180.0,
+      "has_real_speech": true,
+      "has_audio": true,
+      "choice_based": false,
+      "explicit_whole_video": false,
+      "choices": [],
+      "explicit_timestamps": [],
+      "explicit_intervals": [],
+      "transcript_preview": "The teacher explains gradients and backpropagation.",
+      "rule_hints": {
+        "possible_temporal_relation": "none",
+        "explicit_visual_reference": false,
+        "explicit_speech_reference": false,
+        "confidence": "low"
+      }
+    },
+    "question_analysis": {
+      "task_type": "explanation",
+      "temporal_scope": "none",
+      "temporal_relation": "none",
+      "answer_target": "the process of backpropagation",
+      "content_modalities": [],
+      "choice_based": false,
+      "reason": "The user is asking for an explanation of a concept (backpropagation process). Although the concept itself has steps, the question does not specify a video time range or temporal relation within the video, nor does it explicitly reference speech or visual modalities.",
+      "analysis_method": "llm"
+    },
+    "evidence_plan": {
+      "required_modalities": [
+        "speech"
+      ],
+      "required_facts": [
+        {
+          "fact": "The speaker explicitly states the steps or components of the backpropagation process, such as forward pass, loss calculation, and gradient computation.",
+          "modality": "speech"
+        },
+        {
+          "fact": "The speaker describes the chain rule application or the updating of weights in the network.",
+          "modality": "speech"
+        }
+      ],
+      "decision_facts": [
+        "The complete sequence of steps for backpropagation as explained in the video."
+      ],
+      "min_distinct_timestamps": 1,
+      "requires_temporal_order": false,
+      "requires_global_coverage": false,
+      "requires_visual_identity": false,
+      "human_readable_requirements": [
+        "Extract the spoken explanation of the backpropagation process from the video."
+      ],
+      "reason": "The question asks for an explanation of a conceptual process. Since it is an explanation task without explicit temporal constraints or visual references in the question, the primary modality needed is speech to capture the verbal explanation. Visual modality is not strictly required unless the explanation relies heavily on specific diagrams, but speech is the minimal and most direct modality for a conceptual explanation.",
+      "planning_method": "llm"
+    }
+  },
+  {
+    "question": "Summarize the overall process shown in the video and identify its main phases.",
+    "deterministic_context": {
+      "video_title": "Example video",
+      "video_duration": 180.0,
+      "has_real_speech": false,
+      "has_audio": false,
+      "choice_based": false,
+      "explicit_whole_video": true,
+      "choices": [],
+      "explicit_timestamps": [],
+      "explicit_intervals": [],
+      "transcript_preview": "",
+      "rule_hints": {
+        "possible_temporal_relation": "stage",
+        "explicit_visual_reference": false,
+        "explicit_speech_reference": false,
+        "confidence": "low"
+      }
+    },
+    "question_analysis": {
+      "task_type": "summary",
+      "temporal_scope": "whole_video",
+      "temporal_relation": "stage",
+      "answer_target": "A summary of the overall process and identification of its main phases",
+      "content_modalities": [
+        "visual"
+      ],
+      "choice_based": false,
+      "reason": "The user asks to summarize the overall process and identify its main phases, which requires a whole-video overview and understanding the stage-based temporal structure of the process. Visual modality is inferred as the video has no speech/audio.",
+      "analysis_method": "llm"
+    },
+    "evidence_plan": {
+      "required_modalities": [
+        "visual"
+      ],
+      "required_facts": [
+        {
+          "fact": "The initial action or state that starts the overall process",
+          "modality": "visual"
+        },
+        {
+          "fact": "The intermediate actions or states that constitute the main body of the process",
+          "modality": "visual"
+        },
+        {
+          "fact": "The final action or state that concludes the overall process",
+          "modality": "visual"
+        }
+      ],
+      "decision_facts": [
+        "The complete sequence of visually distinct phases and their chronological order from the start to the end of the video"
+      ],
+      "min_distinct_timestamps": 3,
+      "requires_temporal_order": true,
+      "requires_global_coverage": true,
+      "requires_visual_identity": true,
+      "human_readable_requirements": [
+        "Identify the visual actions/states at the beginning of the video to establish the first phase.",
+        "Identify the visual actions/states in the middle of the video to establish intermediate phases.",
+        "Identify the visual actions/states at the end of the video to establish the final phase.",
+        "Determine the chronological order of these phases to summarize the overall process."
+      ],
+      "reason": "To summarize the overall process and identify its main phases, it is necessary to observe the visual sequence from start to finish. Since the temporal relation is 'stage', at least three distinct timestamps (start, middle, end) are required to prove the existence and order of different stages. Visual modality is the only available and required modality as specified in the question analysis.",
+      "planning_method": "llm"
+    }
+  }
+]

@@ -10,6 +10,7 @@ def test_url_ingest_uses_subtitles_when_available(monkeypatch, tmp_path: Path):
     subtitle.write_text("WEBVTT\n\n00:00:00.000 --> 00:00:05.000\n字幕内容\n", encoding="utf-8")
 
     monkeypatch.setattr(pipeline, "fetch_url_metadata", lambda url, output: (_metadata(), {"id": "url1"}))
+    monkeypatch.setattr(pipeline, "validate_public_media_url", lambda url: url)
     monkeypatch.setattr(pipeline, "download_video_file", lambda url, output: tmp_path / "video.mp4")
     monkeypatch.setattr(pipeline, "download_subtitle_file", lambda url, output: subtitle)
 
@@ -29,6 +30,7 @@ def test_url_ingest_uses_subtitles_when_available(monkeypatch, tmp_path: Path):
 
 
 def test_url_ingest_falls_back_to_asr_without_subtitles(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(pipeline, "validate_public_media_url", lambda url: url)
     monkeypatch.setattr(pipeline, "fetch_url_metadata", lambda url, output: (_metadata(), {"id": "url1"}))
     monkeypatch.setattr(pipeline, "download_video_file", lambda url, output: tmp_path / "video.mp4")
     monkeypatch.setattr(pipeline, "download_subtitle_file", lambda url, output: None)

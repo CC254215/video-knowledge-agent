@@ -8,6 +8,8 @@ from pathlib import Path
 
 from app.models import VideoFrame
 
+MEDIA_PROCESS_TIMEOUT_SECONDS = 600
+
 
 def extract_frames(
     video_id: str,
@@ -16,6 +18,7 @@ def extract_frames(
     fps: float = 1.0,
     start: float | None = None,
     end: float | None = None,
+    frame_output_dir: str | Path | None = None,
 ) -> list[VideoFrame]:
     """Extract a candidate frame pool with ffmpeg.
 
@@ -25,7 +28,7 @@ def extract_frames(
     source = Path(video_path)
     if not source.exists():
         raise FileNotFoundError(f"Video file does not exist: {source}")
-    output_dir = Path(video_dir) / "frames" / ("refined" if start is not None else "raw")
+    output_dir = Path(frame_output_dir) if frame_output_dir is not None else Path(video_dir) / "frames" / ("refined" if start is not None else "raw")
     output_dir.mkdir(parents=True, exist_ok=True)
     if start is not None:
         for old in output_dir.glob("frame_*.jpg"):
@@ -34,7 +37,7 @@ def extract_frames(
     errors: list[str] = []
     for ffmpeg in _ffmpeg_executables():
         command = _frame_extract_command(ffmpeg, source, pattern, fps, start, end)
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=MEDIA_PROCESS_TIMEOUT_SECONDS)
         if result.returncode == 0:
             break
         errors.append(f"[{ffmpeg}] {result.stderr.strip()}")
@@ -42,7 +45,7 @@ def extract_frames(
         if fallback_source is None:
             continue
         fallback_command = _frame_extract_command(ffmpeg, fallback_source, pattern, fps, start, end)
-        fallback_result = subprocess.run(fallback_command, capture_output=True, text=True, check=False)
+        fallback_result = subprocess.run(fallback_command, capture_output=True, text=True, check=False, timeout=MEDIA_PROCESS_TIMEOUT_SECONDS)
         if fallback_result.returncode == 0:
             break
         errors.append(f"[{ffmpeg}][h264-fallback] {fallback_result.stderr.strip()}")
@@ -109,7 +112,7 @@ def _transcode_to_h264_if_needed(
         "128k",
         str(fallback_path),
     ]
-    transcode_result = subprocess.run(transcode_cmd, capture_output=True, text=True, check=False)
+    transcode_result = subprocess.run(transcode_cmd, capture_output=True, text=True, check=False, timeout=MEDIA_PROCESS_TIMEOUT_SECONDS)
     if transcode_result.returncode != 0:
         return None
     return fallback_path

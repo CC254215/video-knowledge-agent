@@ -21,8 +21,10 @@ class LLMClient:
         base_url: str | None = None,
         model: str | None = None,
         validate_runtime_endpoint: bool = True,
+        scheduler_settings: Settings | None = None,
     ) -> None:
         self.settings = settings or get_settings()
+        self.scheduler_settings = scheduler_settings or self.settings
         self.log_dir = log_dir
         self.api_key = api_key or self.settings.openai_api_key
         self.base_url = base_url or self.settings.runtime_llm_base_url
@@ -57,9 +59,12 @@ class LLMClient:
             "model": self.model,
             "messages": messages,
             "temperature": 0.2,
+            "max_tokens": self.settings.llm_max_output_tokens,
         }
         if response_format:
             payload["response_format"] = response_format
+        if _supports_zhipu_thinking(self.settings, self.base_url, self.model):
+            payload["thinking"] = {"type": self.settings.llm_thinking_mode}
         request_summary = _payload_summary(payload)
         def _request() -> Any:
             result = httpx.post(
@@ -73,7 +78,10 @@ class LLMClient:
             return result
 
         try:
-            response = get_scheduler(self.settings).call("llm", _request)
+            response = get_scheduler(self.scheduler_settings).call(
+                "llm", _request,
+                retryable=(lambda exc: False) if self.settings.api_max_retries == 0 else None,
+            )
             if response.status_code >= 400:
                 body = response.text[:4000]
                 self._write_log(
@@ -130,7 +138,10 @@ class LLMClient:
         json_prompt = f"{prompt}\nReturn valid JSON only."
         if schema_hint:
             json_prompt += f"\nSchema hint:\n{schema_hint}"
-        text = self.generate_text(json_prompt)
+        text = self.generate_chat(
+            [{"role": "user", "content": json_prompt}],
+            response_format={"type": "json_object"},
+        )
         parsed = _parse_json_object(text)
         if parsed is not None:
             return parsed
@@ -148,6 +159,15 @@ def _join_openai_endpoint(base_url: str, endpoint: str) -> str:
     if base.endswith(endpoint):
         return base
     return f"{base}/{endpoint}"
+
+
+def _supports_zhipu_thinking(settings: Settings, base_url: str, model: str) -> bool:
+    mode = settings.llm_thinking_mode.strip().lower()
+    if mode not in {"enabled", "disabled"}:
+        return False
+    return model.lower().startswith("glm-") and (
+        settings.llm_provider.strip().lower() == "zhipu" or "bigmodel.cn" in base_url.lower()
+    )
 
 
 def _payload_summary(payload: dict[str, Any]) -> dict[str, Any]:

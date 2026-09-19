@@ -82,11 +82,11 @@ class VLMCaptioner:
                         {
                             "type": "text",
                             "text": (
-                                "Describe this video frame for evidence-grounded video QA. "
-                                "Be concise. If it is a static talking head, say so briefly without useless details. "
-                                "If the frame contains slides, code, charts, formulas, UI, or a demo step, focus on its visible semantic content. "
-                                "OCR is disabled; do not transcribe tiny text verbatim. Do not infer facts not visible in the frame. "
-                                f"Nearby speech context: {context or ''}"
+                                "请用简体中文描述这张视频帧，用于有证据约束的视频问答。"
+                                "描述要简洁；如果只是人物出镜，简要说明即可。"
+                                "如果画面包含幻灯片、代码、图表、公式、软件界面或演示步骤，重点描述可见的语义内容。"
+                                "当前禁用 OCR，不要逐字转写微小文字，也不要推断画面中不可见的事实。"
+                                f"附近语音上下文：{context or ''}"
                             ),
                         },
                         {"type": "image_url", "image_url": {"url": image_url}},

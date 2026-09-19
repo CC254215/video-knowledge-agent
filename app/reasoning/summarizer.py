@@ -9,6 +9,7 @@ from app.config import Settings, get_settings
 from app.models import (
     ActionItem,
     AnalysisItem,
+    CanonicalEntity,
     ConfidenceLevel,
     ModalityProfile,
     MultimodalSegment,
@@ -244,6 +245,16 @@ If evidence is insufficient, write insufficient_evidence for that item.
 OCR is disabled. Allowed evidence types: speech, frame, frame_caption.
 OCR 已禁用。
 The evidence pack below is a coverage sample across the whole video, not a full transcript.
+Build a chronological outline with explicit time ranges, not isolated moments.
+For videos of at least 10 minutes, normally return 6-10 outline items, with no item spanning
+more than about 3 minutes unless the evidence is genuinely one indivisible topic.
+Every usable segment should be cited by at least one outline item.
+
+Also extract only high-value named entities (software, products, models, libraries,
+frameworks, companies, people, versions, abbreviations, or repeated ASR variants).
+Do not rewrite ordinary sentences. Only canonicalize an ASR variant when title,
+visual text, repeated context, or multiple independent mentions support it. Keep
+uncertain candidates with needs_review=true and do not force a replacement.
 
 Video metadata:
 title={metadata.title}
@@ -260,7 +271,7 @@ multimodal_segments:
 
 Return valid JSON with these fields:
 quick_overview, structured_outline, deep_analysis, action_items, important_quotes,
-open_questions, evidence_coverage.
+open_questions, evidence_coverage, canonical_entities.
 """
     return f"""
 你是 Video Knowledge Agent 的摘要模块。只能基于给定 multimodal_segments 生成摘要。
@@ -285,7 +296,7 @@ multimodal_segments:
 
 请输出 JSON，字段：
 quick_overview, structured_outline, deep_analysis, action_items, important_quotes,
-open_questions, evidence_coverage。
+open_questions, evidence_coverage, canonical_entities。
 """
 
 
@@ -294,7 +305,7 @@ def _summary_schema_hint() -> str:
 {
   "quick_overview": ["3 Chinese sentences"],
   "structured_outline": [
-    {"timestamp":"[00:00:00]", "topic":"...", "key_points":["..."], "segment_ids":["seg_0000"]}
+    {"timestamp":"[00:00:00] - [00:02:30]", "topic":"...", "key_points":["..."], "segment_ids":["seg_0000"]}
   ],
   "deep_analysis": [
     {"claim":"...", "evidence_segment_ids":["seg_0000"], "caveats":["..."]}
@@ -307,6 +318,10 @@ def _summary_schema_hint() -> str:
   ],
   "open_questions": ["..."],
   "evidence_coverage": {"covered_segment_ids":["seg_0000"], "missing_evidence_items":[]}
+  ,"canonical_entities": [
+    {"canonical":"...", "aliases":["..."], "entity_type":"software", "confidence":0.9,
+     "evidence_sources":["video_title","speech","frame_caption"], "reason":"...", "needs_review":false}
+  ]
 }
 """
 
@@ -379,6 +394,14 @@ def _coerce_llm_summary(
         warnings.append("evidence_missing: LLM summary did not provide grounded items.")
 
     confidence = ConfidenceLevel.low if any("evidence_missing" in warning for warning in warnings) else ConfidenceLevel.high
+    entities: list[CanonicalEntity] = []
+    for item in payload.get("canonical_entities") or []:
+        if not isinstance(item, dict) or not str(item.get("canonical") or "").strip():
+            continue
+        try:
+            entities.append(CanonicalEntity.model_validate(item))
+        except Exception:
+            continue
     report = SummaryReport(
         video_id=metadata.video_id,
         quick_overview=[str(item) for item in payload.get("quick_overview") or []][:3],
@@ -390,6 +413,7 @@ def _coerce_llm_summary(
         modality_note=f"{modality_profile.mode.value}: {modality_profile.reason}",
         evidence_coverage=payload.get("evidence_coverage") if isinstance(payload.get("evidence_coverage"), dict) else {},
         confidence=confidence,
+        canonical_entities=entities,
         generation_status="llm_success",
         warnings=warnings,
     )

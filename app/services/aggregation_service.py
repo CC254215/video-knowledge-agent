@@ -29,6 +29,15 @@ class AggregationService:
             return AggregationResult(success=False, message="请先处理或选择一个视频。", error="missing_current_video")
         try:
             result = MultiVideoAggregator(self.settings).run(video_ids=None, export_obsidian=bool(self.settings.obsidian_vault_path))
+            if self.settings.mempalace_provider != "noop":
+                from app.memory.knowledge_catalog import KnowledgeCatalog
+
+                try:
+                    catalog = KnowledgeCatalog(self.settings)
+                    result["memory_topics"] = catalog.topics(current_video_id)
+                    result["memory_catalog"] = catalog.stats()
+                except Exception as exc:
+                    result["memory_warning"] = str(exc)
         except Exception as exc:  # noqa: BLE001
             return AggregationResult(success=False, message=f"聚合失败：{exc}", current_video_id=current_video_id, error=str(exc))
         topics = result.get("topics") if isinstance(result.get("topics"), list) else []
@@ -49,4 +58,3 @@ class AggregationService:
             obsidian_paths=[str(path) for path in result.get("obsidian_paths", [])],
             raw=result,
         )
-

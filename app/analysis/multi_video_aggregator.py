@@ -275,20 +275,35 @@ class MultiVideoAggregator:
 
     def save_to_memory(self, topics: list[TopicCluster]) -> int:
         """Save model-derived topic summaries through the memory adapter boundary."""
-        adapter = create_memory_adapter(self.settings)
-        for topic in topics:
-            adapter.save_model_summary(
-                {
-                    "summary_type": "multi_video_topic_cluster",
-                    "cluster_id": topic.cluster_id,
-                    "description": topic.description,
-                    "video_ids": sorted({record.video_id for record in topic.records}),
-                    "node_ids": [record.node_id for record in topic.records],
-                    "consensus": topic.consensus,
-                    "disagreements": topic.disagreements,
-                }
-            )
-        return len(topics)
+        if self.settings.mempalace_provider == "noop":
+            return 0
+        adapter = None
+        saved = 0
+        try:
+            adapter = create_memory_adapter(self.settings)
+            for topic in topics:
+                adapter.save_model_summary(
+                    {
+                        "summary_type": "multi_video_topic_cluster",
+                        "cluster_id": topic.cluster_id,
+                        "description": topic.description,
+                        "video_ids": sorted({record.video_id for record in topic.records}),
+                        "node_ids": [record.node_id for record in topic.records],
+                        "consensus": topic.consensus,
+                        "disagreements": topic.disagreements,
+                        "status": "similarity_heuristic_only",
+                        "excluded_from_factual_retrieval": True,
+                    }
+                )
+                saved += 1
+        except Exception:
+            # Topic notes remain useful when the optional memory backend is offline.
+            pass
+        finally:
+            close = getattr(adapter, "close", None)
+            if callable(close):
+                close()
+        return saved
 
     def describe_cluster(self, records: list[ViewpointRecord]) -> str:
         words: list[str] = []

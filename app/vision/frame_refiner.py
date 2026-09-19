@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 
 from app.config import Settings, get_settings
@@ -42,13 +43,29 @@ class FrameEvidenceRefiner:
         target_time_range: tuple[float, float],
         segments: list[MultimodalSegment],
         max_new_frames: int | None = None,
+        refinement_strategy: str = "local_first",
+        refinement_id: str | None = None,
+        range_index: int = 0,
+        persist: bool = True,
+        metadata: VideoMetadata | None = None,
     ) -> list[MultimodalSegment]:
         """Add frame and frame_caption evidence only. OCR is disabled for this stage."""
         start, end = target_time_range
         max_new_frames = max_new_frames or _default_refine_count(self.video_dir)
-        added_frames = self._extract_refined_frames(video_id, question, start, end, max_new_frames)
+        added_frames = self._extract_refined_frames(
+            video_id,
+            question,
+            start,
+            end,
+            max_new_frames,
+            refinement_strategy=refinement_strategy,
+            refinement_id=refinement_id,
+            range_index=range_index,
+            metadata=metadata,
+        )
         captions = VLMCaptioner(self.settings).caption_frames(added_frames)
-        save_frame_captions(_load_existing_captions(self.video_dir) + captions, self.video_dir)
+        if persist:
+            save_frame_captions(_load_existing_captions(self.video_dir) + captions, self.video_dir)
 
         for segment in segments:
             if segment.end < start or segment.start > end:
@@ -71,18 +88,46 @@ class FrameEvidenceRefiner:
             segment.ocr_text = ""
             segment.modality_weight = _weight(segment.transcript_text, segment.visual_summary, segment.representative_frame_ids)
 
-        save_multimodal_segments(segments, self.video_dir)
+        if persist:
+            save_multimodal_segments(segments, self.video_dir)
         return segments
 
-    def _extract_refined_frames(self, video_id: str, question: str, start: float, end: float, max_new_frames: int) -> list[VideoFrame]:
+    def _extract_refined_frames(
+        self,
+        video_id: str,
+        question: str,
+        start: float,
+        end: float,
+        max_new_frames: int,
+        refinement_strategy: str = "local_first",
+        refinement_id: str | None = None,
+        range_index: int = 0,
+        metadata: VideoMetadata | None = None,
+    ) -> list[VideoFrame]:
         metadata_path = self.video_dir / "metadata.json"
-        if metadata_path.exists():
+        if metadata is None and metadata_path.exists():
             metadata = VideoMetadata.model_validate(json.loads(metadata_path.read_text(encoding="utf-8")))
+        if metadata is not None:
             source_path = metadata.local_path
             if source_path and Path(source_path).exists():
                 try:
-                    frames = extract_frames(video_id, source_path, self.video_dir, fps=2.0, start=start, end=end)
-                    frames = dedupe_frames(frames)[:max_new_frames]
+                    run_id = refinement_id or uuid.uuid4().hex
+                    output_dir = self.video_dir / "frames" / "refined" / run_id / f"range_{range_index:03d}"
+                    frames = extract_frames(
+                        video_id,
+                        source_path,
+                        self.video_dir,
+                        fps=2.0,
+                        start=start,
+                        end=end,
+                        frame_output_dir=output_dir,
+                    )
+                    deduped = dedupe_frames(frames)
+                    frames = (
+                        _temporal_stratified_select(deduped, max_new_frames)
+                        if refinement_strategy == "temporal_stratified"
+                        else deduped[:max_new_frames]
+                    )
                     for frame in frames:
                         frame.selected = True
                         frame.selection_reason = f"frame_refiner:{question[:80]}"
@@ -112,6 +157,18 @@ def _refined_timestamps(start: float, end: float) -> list[float]:
     count = min(10, max(3, int(end - start) + 1))
     step = (end - start) / max(1, count - 1)
     return [start + step * index for index in range(count)]
+
+
+def _temporal_stratified_select(frames: list[VideoFrame], max_count: int) -> list[VideoFrame]:
+    if max_count <= 0 or len(frames) <= max_count:
+        return frames[:max_count]
+    selected: list[VideoFrame] = []
+    for index in range(max_count):
+        left = round(index * len(frames) / max_count)
+        right = round((index + 1) * len(frames) / max_count)
+        bucket = frames[left:max(left + 1, right)]
+        selected.append(bucket[len(bucket) // 2])
+    return selected
 
 
 def _load_existing_captions(video_dir: Path) -> list[FrameCaption]:

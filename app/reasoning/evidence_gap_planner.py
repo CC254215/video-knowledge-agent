@@ -46,6 +46,8 @@ class EvidenceGapPlanner:
         mode = self.settings.evidence_gap_agent_mode.lower()
         if mode == "off":
             return EvidenceAcquisitionPlan(decision="answer_with_existing_evidence", reason="evidence_gap_agent_disabled")
+        unsupported_required = [row["fact"] for row in turn.fact_support if row.get("kind") == "required_fact" and row.get("status") != "supported"]
+        unsupported_decision = [row["fact"] for row in turn.fact_support if row.get("kind") == "decision_fact" and row.get("status") != "supported"]
         rule_decision = EvidenceGapAgent().decide(
             question,
             metadata,
@@ -54,13 +56,16 @@ class EvidenceGapPlanner:
             turn.agreement_score,
             turn.confidence.value,
             turn.needs_visual_check,
+            turn.structured_evidence_gate.get("unmet_constraints", []),
+            unsupported_required,
+            unsupported_decision,
         )
         if mode == "rule" or not self._should_use_llm():
-            return _plan_from_rule(question, rule_decision)
+            return _plan_from_rule(question, rule_decision, turn)
         try:
             return self._decide_with_llm(question, metadata, segments, turn, evidence, rule_decision)
         except Exception as exc:  # noqa: BLE001
-            plan = _plan_from_rule(question, rule_decision)
+            plan = _plan_from_rule(question, rule_decision, turn)
             plan.reason = f"llm_planner_failed_fallback_rule: {exc}; {plan.reason}"
             return plan
 
@@ -91,7 +96,7 @@ class EvidenceGapPlanner:
         return _coerce_plan(question, payload)
 
 
-def _plan_from_rule(question: str, decision: EvidenceGapDecision) -> EvidenceAcquisitionPlan:
+def _plan_from_rule(question: str, decision: EvidenceGapDecision, turn: ConversationTurn | None = None) -> EvidenceAcquisitionPlan:
     if not decision.is_video_relevant:
         return EvidenceAcquisitionPlan(
             decision="early_exit",
@@ -101,12 +106,19 @@ def _plan_from_rule(question: str, decision: EvidenceGapDecision) -> EvidenceAcq
             early_exit_reply=decision.early_exit_reply,
         )
     if decision.should_refine:
+        missing_fact_query = _missing_fact_query(turn)
+        target_ranges = decision.target_ranges
+        if turn and (
+            (turn.evidence_plan and turn.evidence_plan.requires_global_coverage)
+            or (turn.question_analysis and turn.question_analysis.temporal_scope == "whole_video")
+        ):
+            target_ranges = []
         return EvidenceAcquisitionPlan(
             decision="acquire_more_evidence",
             question_video_relevance="strong",
             evidence_sufficiency="insufficient",
             reason=";".join(decision.reasons),
-            actions=[build_refinement_tool_call(question, decision.target_ranges)],
+            actions=[build_refinement_tool_call(question, target_ranges, query=missing_fact_query or question)],
         )
     return EvidenceAcquisitionPlan(
         decision="answer_with_existing_evidence",
@@ -114,6 +126,13 @@ def _plan_from_rule(question: str, decision: EvidenceGapDecision) -> EvidenceAcq
         evidence_sufficiency="sufficient_or_no_action",
         reason="rule_agent_no_refinement",
     )
+
+
+def _missing_fact_query(turn: ConversationTurn | None) -> str:
+    if turn is None:
+        return ""
+    facts = [str(row.get("fact")) for row in turn.fact_support if row.get("status") != "supported" and row.get("fact")]
+    return "; ".join(facts)
 
 
 def _coerce_plan(question: str, payload: dict[str, Any]) -> EvidenceAcquisitionPlan:
@@ -198,7 +217,8 @@ def _planner_prompt(
         "rules": [
             "Do not answer the user question.",
             "If the question is weakly related or unrelated to the video outline, choose no_refinement_needed or early_exit.",
-            "If more evidence is useful, output an action using partial_restart_for_evidence.",
+            "For a question explicitly about this video's visible actions, a missing transcript or sparse outline is an evidence gap, not proof of irrelevance. Acquire frames before deciding it is unanswerable.",
+            "Prioritize unmet EvidencePlan constraints and unsupported required/decision facts. If more evidence is useful, output an action using partial_restart_for_evidence.",
             "If target_ranges are unknown, leave target_ranges empty and provide a query; the tool will locate matching transcript segments by semantic retrieval.",
             "OCR is disabled; do not request OCR.",
         ],
@@ -216,6 +236,11 @@ def _planner_prompt(
         "segments_brief": segment_brief,
         "original_question": question,
         "current_turn": turn.model_dump(mode="json"),
+        "question_analysis": turn.question_analysis.model_dump(mode="json") if turn.question_analysis else None,
+        "evidence_plan": turn.evidence_plan.model_dump(mode="json") if turn.evidence_plan else None,
+        "unmet_constraints": turn.structured_evidence_gate.get("unmet_constraints", []),
+        "unsupported_required_facts": [row for row in turn.fact_support if row.get("kind") == "required_fact" and row.get("status") != "supported"],
+        "unsupported_decision_facts": [row for row in turn.fact_support if row.get("kind") == "decision_fact" and row.get("status") != "supported"],
         "current_video_evidence": evidence_brief,
         "rule_gap_decision": rule_decision.model_dump(mode="json"),
     }

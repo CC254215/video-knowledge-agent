@@ -3,14 +3,16 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from app.config import get_settings
 from app.models import VideoMetadata
 from app.runtime.scheduler import get_scheduler
 
 logger = logging.getLogger(__name__)
+ProgressCallback = Callable[[str], None]
 _DISABLED_BROWSER_COOKIE_SPECS: set[str] = set()
 _DISABLED_COOKIE_FILES: set[str] = set()
 
@@ -33,6 +35,8 @@ def _apply_ytdlp_auth_opts(ydl_opts: dict[str, Any]) -> dict[str, Any]:
     cookies_file = settings.ytdlp_cookies_file
     if cookies_file:
         cookie_path = Path(cookies_file)
+        if str(cookie_path) in {"", "."}:
+            return ydl_opts
         if str(cookie_path) in _DISABLED_COOKIE_FILES:
             logger.info("Skipping disabled YTDLP_COOKIES_FILE=%s for this process.", cookie_path)
         elif _is_valid_netscape_cookie_file(cookie_path):
@@ -122,7 +126,70 @@ def classify_ytdlp_error(exc: Exception) -> str:
         return "unsupported_site"
     if "invalid url" in text or "not a valid url" in text:
         return "invalid_url"
+    if "timed out" in text or "timeout" in text or "connection reset" in text:
+        return "network_timeout"
     return "download_failed"
+
+
+def _network_opts(*, downloading: bool = False) -> dict[str, Any]:
+    settings = get_settings()
+    opts: dict[str, Any] = {
+        "socket_timeout": settings.ytdlp_socket_timeout_seconds,
+        "retries": settings.ytdlp_retries,
+        "fragment_retries": settings.ytdlp_retries,
+        "extractor_retries": settings.ytdlp_retries,
+        "continuedl": True,
+    }
+    if downloading and settings.ytdlp_http_chunk_bytes:
+        # Periodic range requests avoid losing a large download to one stale CDN connection.
+        opts["http_chunk_size"] = settings.ytdlp_http_chunk_bytes
+    return opts
+
+
+def _progress_hook(callback: ProgressCallback | None, label: str):
+    last_update = {"percent": -1, "time": 0.0}
+
+    def hook(status: dict[str, Any]) -> None:
+        if callback is None:
+            return
+        state = status.get("status")
+        if state == "finished":
+            callback(f"{label} 100% · 下载完成")
+            return
+        if state != "downloading":
+            return
+        downloaded = float(status.get("downloaded_bytes") or 0)
+        total = float(status.get("total_bytes") or status.get("total_bytes_estimate") or 0)
+        percent = min(100.0, downloaded * 100 / total) if total else 0.0
+        now = time.monotonic()
+        whole_percent = int(percent)
+        if whole_percent == last_update["percent"] and now - last_update["time"] < 1.0:
+            return
+        last_update.update(percent=whole_percent, time=now)
+        details = [f"{label} {percent:.1f}%" if total else f"{label} {_format_bytes(downloaded)}"]
+        speed = status.get("speed")
+        eta = status.get("eta")
+        if speed:
+            details.append(f"{_format_bytes(float(speed))}/s")
+        if eta is not None:
+            details.append(f"剩余 {_format_duration(float(eta))}")
+        callback(" · ".join(details))
+
+    return hook
+
+
+def _format_bytes(value: float) -> str:
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024 or unit == "GiB":
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GiB"
+
+
+def _format_duration(seconds: float) -> str:
+    minutes, secs = divmod(max(0, int(seconds)), 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}" if hours else f"{minutes:02d}:{secs:02d}"
 
 
 def _is_browser_cookie_copy_error(exc: Exception) -> bool:
@@ -165,12 +232,14 @@ def fetch_url_metadata(url: str, output_dir: Path) -> tuple[VideoMetadata, dict[
 
     output_dir.mkdir(parents=True, exist_ok=True)
     ydl_opts = _apply_ytdlp_auth_opts({
+        **_network_opts(),
         "skip_download": True,
         "writesubtitles": True,
         "writeautomaticsub": True,
         "subtitleslangs": ["zh-Hans", "zh", "en"],
         "quiet": True,
         "no_warnings": True,
+        "noplaylist": True,
     })
     try:
         info = get_scheduler().call(
@@ -195,10 +264,16 @@ def fetch_url_metadata(url: str, output_dir: Path) -> tuple[VideoMetadata, dict[
         duration=float(info["duration"]) if info.get("duration") else None,
         language=info.get("language"),
     )
+    settings = get_settings()
+    if metadata.duration and metadata.duration > settings.max_media_duration_seconds:
+        raise DownloadError(
+            "media_too_long",
+            f"media duration {metadata.duration:.0f}s exceeds limit {settings.max_media_duration_seconds:.0f}s",
+        )
     return metadata, info
 
 
-def download_subtitle_file(url: str, output_dir: Path) -> Path | None:
+def download_subtitle_file(url: str, output_dir: Path, progress_callback: ProgressCallback | None = None) -> Path | None:
     """Download the best available human subtitle, then automatic subtitle.
 
     The returned path is one of vtt/srt/json3 when available. Empty result means subtitles are not
@@ -211,12 +286,17 @@ def download_subtitle_file(url: str, output_dir: Path) -> Path | None:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     common = _apply_ytdlp_auth_opts({
+        **_network_opts(downloading=True),
         "skip_download": True,
         "subtitleslangs": ["zh-Hans", "zh-CN", "zh", "en", "all"],
         "subtitlesformat": "vtt/srt/json3",
         "outtmpl": str(output_dir / "%(id)s.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
+        "noprogress": True,
+        "noplaylist": True,
+        "max_filesize": get_settings().max_download_bytes,
+        "progress_hooks": [_progress_hook(progress_callback, "正在下载字幕")],
     })
     for automatic in (False, True):
         before = set(output_dir.glob("*"))
@@ -241,7 +321,7 @@ def download_subtitle_file(url: str, output_dir: Path) -> Path | None:
     return None
 
 
-def download_audio_for_asr(url: str, output_dir: Path) -> Path:
+def download_audio_for_asr(url: str, output_dir: Path, progress_callback: ProgressCallback | None = None) -> Path:
     try:
         import yt_dlp
     except ImportError as exc:
@@ -252,11 +332,15 @@ def download_audio_for_asr(url: str, output_dir: Path) -> Path:
     if existing:
         return existing
     ydl_opts = _apply_ytdlp_auth_opts({
+        **_network_opts(downloading=True),
         "format": "bestaudio/best",
         "outtmpl": str(output_dir / "source_audio.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        "noprogress": True,
+        "max_filesize": get_settings().max_download_bytes,
+        "progress_hooks": [_progress_hook(progress_callback, "正在下载音频")],
     })
     ffmpeg_location = _local_ffmpeg_location()
     if ffmpeg_location:
@@ -275,7 +359,7 @@ def download_audio_for_asr(url: str, output_dir: Path) -> Path:
     return filename
 
 
-def download_video_file(url: str, output_dir: Path) -> Path:
+def download_video_file(url: str, output_dir: Path, progress_callback: ProgressCallback | None = None) -> Path:
     try:
         import yt_dlp
     except ImportError as exc:
@@ -285,13 +369,23 @@ def download_video_file(url: str, output_dir: Path) -> Path:
     existing = _first_existing(output_dir, ("source_video.mp4", "source_video.*"))
     if existing:
         return existing
+    max_height = get_settings().ytdlp_max_video_height
     ydl_opts = _apply_ytdlp_auth_opts({
-        "format": "bv*+ba/best",
+        **_network_opts(downloading=True),
+        # Prefer broadly decodable H.264 and cap resolution for much faster CPU frame extraction.
+        "format": (
+            f"bv*[vcodec^=avc1][height<={max_height}]+ba/"
+            f"bv*[vcodec^=h264][height<={max_height}]+ba/"
+            f"bv*[height<={max_height}]+ba/b[height<={max_height}]/best"
+        ),
         "merge_output_format": "mp4",
         "outtmpl": str(output_dir / "source_video.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        "noprogress": True,
+        "max_filesize": get_settings().max_download_bytes,
+        "progress_hooks": [_progress_hook(progress_callback, "正在下载视频")],
     })
     ffmpeg_location = _local_ffmpeg_location()
     if ffmpeg_location:
@@ -320,7 +414,7 @@ def _local_ffmpeg_location() -> str | None:
 
 def _first_existing(output_dir: Path, patterns: tuple[str, ...]) -> Path | None:
     for pattern in patterns:
-        matches = sorted(path for path in output_dir.glob(pattern) if path.is_file())
+        matches = sorted(path for path in output_dir.glob(pattern) if path.is_file() and not path.name.endswith((".part", ".ytdl")))
         if matches:
             return matches[0]
     return None

@@ -19,7 +19,13 @@ def test_obsidian_writer_writes_legal_markdown(tmp_path: Path):
     paths = write_obsidian_notes(vault, metadata, summary, storyline)
     assert paths["video_note"].exists()
     assert paths["storyline_note"].exists()
+    assert paths["evidence_note"].exists()
+    assert paths["qa_note"].exists()
+    assert paths["updates_note"].exists()
     text = paths["video_note"].read_text(encoding="utf-8")
     assert "# 30 秒速览" in text
     assert "video_id: v1" in text
+    assert paths["video_note"].name == "index.md"
+    assert paths["video_note"].parent.name == "v1 - Bad--Title"
+    assert (vault / "40_MOCs" / "Video Index.md").exists()
     assert safe_filename(metadata.title) == "Bad--Title"

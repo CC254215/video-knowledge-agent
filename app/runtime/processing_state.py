@@ -29,10 +29,20 @@ class ProcessingState:
     def stage_status(self, name: str) -> str:
         return str((self.payload.get("stages") or {}).get(name, {}).get("status") or PENDING)
 
-    def is_succeeded(self, name: str, required_paths: list[Path] | None = None) -> bool:
+    def is_succeeded(
+        self,
+        name: str,
+        required_paths: list[Path] | None = None,
+        fingerprint: str | None = None,
+    ) -> bool:
         if self.stage_status(name) != TERMINAL_SUCCESS:
             return False
-        return all(path.exists() for path in (required_paths or []))
+        if not all(path.exists() for path in (required_paths or [])):
+            return False
+        if fingerprint is not None:
+            entry = (self.payload.get("stages") or {}).get(name, {})
+            return entry.get("fingerprint") == fingerprint
+        return True
 
     def start(self, name: str) -> None:
         self._set(name, RUNNING, data={"started_at": datetime.utcnow().isoformat(), "started_monotonic": time.monotonic()})
@@ -96,6 +106,8 @@ class ProcessingState:
         entry.update({"status": status, "updated_at": datetime.utcnow().isoformat()})
         if error:
             entry["error"] = error
+        elif status in {RUNNING, TERMINAL_SUCCESS, DEGRADED}:
+            entry.pop("error", None)
         if data:
             entry.update(data)
         stages[name] = entry

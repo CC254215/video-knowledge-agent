@@ -135,7 +135,14 @@ def test_visual_question_sets_needs_visual_check(tmp_path: Path):
         [],
     )
     save_multimodal_segments(segment, tmp_path)
-    turn = ConversationAgent("v1", tmp_path, settings=Settings(_env_file=None)).answer("画面中的按钮是什么？")
+    offline_settings = Settings(
+        _env_file=None,
+        openai_api_key=None,
+        vision_api_key=None,
+        llm_correlation_api_key=None,
+        evidence_llm_api_key=None,
+    )
+    turn = ConversationAgent("v1", tmp_path, settings=offline_settings).answer("画面中的按钮是什么？")
     assert turn.needs_visual_check is True
     assert "证据不足" in turn.answer
 

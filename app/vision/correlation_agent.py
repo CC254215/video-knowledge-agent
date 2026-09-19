@@ -16,6 +16,8 @@ from app.config import Settings, get_settings
 from app.models import FrameCorrelationScore, TranscriptSegment, VideoCorrelationProfile, VideoFrame
 from app.runtime.scheduler import get_scheduler
 
+MEDIA_PROCESS_TIMEOUT_SECONDS = 600
+
 CORRELATION_PROMPT = """
 你是一名专业、严谨的视频内容相关性分析师。
 
@@ -223,30 +225,44 @@ def assess_video_text_correlation(
     settings = settings or get_settings()
     text = " ".join(segment.text.strip() for segment in transcript_segments if segment.text.strip())
     if len(text) < settings.correlation_text_min_chars:
-        return _save(_profile_from_confidence([], 1.0, "high", "text_too_short", "text below threshold; default high video relevance"), output_dir)
+        fallback_reason = "no_valid_transcript" if not text else "text_below_threshold"
+        return _save(_profile_from_confidence(
+            [], 1.0, "high", "text_too_short", "text below threshold; default high video relevance",
+            correlation_available=False, fallback_reason=fallback_reason,
+        ), output_dir)
     if not video_path or not Path(video_path).exists():
-        return _save(_profile_from_confidence([], 1.0, "text_only", "video_unavailable", "video unavailable; skipped visual analysis"), output_dir)
+        return _save(_profile_from_confidence(
+            [], 1.0, "text_only", "video_unavailable", "video unavailable; skipped visual analysis",
+            correlation_available=False, fallback_reason="video_unavailable",
+        ), output_dir)
     if not settings.has_correlation_config:
-        return _save(_profile_from_confidence([], 1.0, "high", "missing_model", "correlation model config missing; preserve default multimodal behavior"), output_dir)
+        return _save(_profile_from_confidence(
+            [], 1.0, "high", "missing_model", "correlation model config missing; preserve default multimodal behavior",
+            correlation_available=False, fallback_reason="missing_model",
+        ), output_dir)
 
     samples = sample_random_correlation_frames(video_id, video_path, output_dir or Path(video_path).parent, max_frames=settings.correlation_sample_frames)
     pairs = [(frame, _text_for_timestamp(frame.timestamp, transcript_segments)) for frame in samples]
     pairs = [(frame, text) for frame, text in pairs if text.strip()]
     if not pairs:
-        return _save(_profile_from_confidence([], 1.0, "text_only", "video_unavailable", "no frame/text pairs available"), output_dir)
+        return _save(_profile_from_confidence(
+            [], 1.0, "text_only", "video_unavailable", "no frame/text pairs available",
+            correlation_available=False, fallback_reason="no_valid_frame_text_pairs",
+        ), output_dir)
     try:
         scored = _score_frame_text_batch(pairs, settings)
     except Exception as exc:  # noqa: BLE001
-        scored = [
-            FrameCorrelationScore(
-                frame_id=frame.frame_id,
-                timestamp=frame.timestamp,
-                text=text,
-                confidence=0.5,
-                reason=f"batch_scoring_failed: {str(exc).splitlines()[0][:300]}",
-            )
-            for frame, text in pairs
-        ]
+        # A failed correlation request is not evidence of medium relevance.
+        # Do not manufacture 0.5 scores here: the pipeline uses the profile
+        # to control frame sampling, so fake scores silently reduce visual
+        # coverage and poison downstream evidence retrieval.
+        failure = str(exc).splitlines()[0][:500]
+        return _save(_profile_from_confidence(
+            [], 1.0, "high", "failed",
+            f"LLM frame/text correlation unavailable: {failure}",
+            correlation_available=False,
+            fallback_reason=f"batch_scoring_failed: {failure}",
+        ), output_dir)
     confidences = [item.confidence for item in scored]
     avg = sum(confidences) / len(confidences)
     profile = _profile_from_confidence(confidences, avg, _level(avg, settings), "success", "LLM frame/text correlation completed")
@@ -271,11 +287,17 @@ def sample_random_correlation_frames(video_id: str, video_path: str | Path, outp
         target = frame_dir / f"corr_{index:04d}.jpg"
         source = fallback_source or path
         command = _single_frame_command(source, target, timestamp)
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=MEDIA_PROCESS_TIMEOUT_SECONDS)
         if result.returncode != 0 and fallback_source is None and _looks_like_decode_failure(result.stderr):
             fallback_source = _transcode_to_h264(path, Path(output_dir))
             if fallback_source:
-                result = subprocess.run(_single_frame_command(fallback_source, target, timestamp), capture_output=True, text=True, check=False)
+                result = subprocess.run(
+                    _single_frame_command(fallback_source, target, timestamp),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=MEDIA_PROCESS_TIMEOUT_SECONDS,
+                )
         if result.returncode == 0 and target.exists():
             frames.append(VideoFrame(frame_id=f"corr_{index:04d}", timestamp=timestamp, path=str(target), selected=True, selection_reason="correlation_probe"))
     if not frames:
@@ -359,7 +381,7 @@ def _transcode_to_h264(source: Path, output_dir: Path) -> Path | None:
         "128k",
         str(fallback_path),
     ]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=MEDIA_PROCESS_TIMEOUT_SECONDS)
     return fallback_path if result.returncode == 0 and fallback_path.exists() else None
 
 
@@ -386,6 +408,12 @@ def _score_frame_text_batch(pairs: list[tuple[VideoFrame, str]], settings: Setti
         raise RuntimeError(f"correlation request failed: status={response.status_code}, body={response.text[:1000]}")
     output = response.json()["choices"][0]["message"]["content"]
     confidences = _parse_confidences(output)
+    if not confidences:
+        raise ValueError("correlation response contained no parseable confidence scores")
+    if len(confidences) < len(pairs):
+        raise ValueError(
+            f"correlation response contained {len(confidences)} scores for {len(pairs)} frame/text pairs"
+        )
     return [
         FrameCorrelationScore(
             frame_id=frame.frame_id,
@@ -419,12 +447,20 @@ def _reason_for_index(text: str, index: int) -> str:
     return "parsed_from_batch_correlation_prompt"
 
 
-def _profile_from_confidence(confidences: list[float], avg: float, level: str, status: str, reason: str) -> VideoCorrelationProfile:
+def _profile_from_confidence(
+    confidences: list[float],
+    avg: float,
+    level: str,
+    status: str,
+    reason: str,
+    correlation_available: bool = True,
+    fallback_reason: str | None = None,
+) -> VideoCorrelationProfile:
     if level == "low":
-        return VideoCorrelationProfile(frame_confidences=confidences, avg_confidence=avg, frame_interval=60.0, refine_frame_count=2, representative_frame_strategy="random", relevance_level="low", status=status, reason=reason)  # type: ignore[arg-type]
+        return VideoCorrelationProfile(frame_confidences=confidences, avg_confidence=avg, frame_interval=60.0, refine_frame_count=2, representative_frame_strategy="random", relevance_level="low", status=status, correlation_available=correlation_available, fallback_reason=fallback_reason, reason=reason)  # type: ignore[arg-type]
     if level == "medium":
-        return VideoCorrelationProfile(frame_confidences=confidences, avg_confidence=avg, frame_interval=2.0, refine_frame_count=5, representative_frame_strategy="default", relevance_level="medium", status=status, reason=reason)  # type: ignore[arg-type]
-    return VideoCorrelationProfile(frame_confidences=confidences, avg_confidence=avg, frame_interval=1.0, refine_frame_count=10, representative_frame_strategy="default", relevance_level=level if level == "text_only" else "high", status=status, reason=reason)  # type: ignore[arg-type]
+        return VideoCorrelationProfile(frame_confidences=confidences, avg_confidence=avg, frame_interval=2.0, refine_frame_count=5, representative_frame_strategy="default", relevance_level="medium", status=status, correlation_available=correlation_available, fallback_reason=fallback_reason, reason=reason)  # type: ignore[arg-type]
+    return VideoCorrelationProfile(frame_confidences=confidences, avg_confidence=avg, frame_interval=1.0, refine_frame_count=10, representative_frame_strategy="default", relevance_level=level if level == "text_only" else "high", status=status, correlation_available=correlation_available, fallback_reason=fallback_reason, reason=reason)  # type: ignore[arg-type]
 
 
 def _level(avg: float, settings: Settings) -> str:
@@ -457,7 +493,13 @@ def _image_data_url(path: Path) -> str:
 
 
 def _probe_duration(path: Path) -> float:
-    result = subprocess.run([_ffprobe_executable(), "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)], capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        [_ffprobe_executable(), "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=MEDIA_PROCESS_TIMEOUT_SECONDS,
+    )
     if result.returncode != 0:
         return 0.0
     try:

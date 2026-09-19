@@ -55,6 +55,7 @@ def greedy_multimodal_dpp_select(
     diversity_weight: float = 0.55,
     modality_bonus: float = 0.08,
     min_relevance: float = 0.05,
+    modality_weights: dict[str, float] | None = None,
 ) -> list[str]:
     """Select multimodal evidence without treating DPP as a truth verifier.
 
@@ -69,12 +70,13 @@ def greedy_multimodal_dpp_select(
     if not remaining:
         remaining = set(range(len(candidate_ids)))
     selected_types: set[str] = set()
+    weights = modality_weights or {"speech": 1.15, "frame_caption": 1.0, "frame": 0.95}
 
     while remaining and len(selected) < k:
         best_index = None
         best_gain = -float("inf")
         for index in remaining:
-            relevance = relevance_scores[index]
+            relevance = relevance_scores[index] * weights.get(evidence_types[index], 1.0)
             if not selected:
                 diversity_penalty = 0.0
             else:

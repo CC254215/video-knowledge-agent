@@ -10,6 +10,7 @@ from rich import print
 
 from app import pipeline
 from app.config import get_settings
+from app.evals.benchmark import EvalOptions, evaluate_dataset, write_eval_report
 from app.memory.mempalace_adapter import MemPalaceMCPAdapter, build_memory_context, create_memory_adapter
 
 app = typer.Typer(help="Local-first Video Knowledge Agent MVP")
@@ -140,6 +141,30 @@ def audit(video_id: str = typer.Option(..., "--video-id")) -> None:
         raise
     except Exception as exc:  # noqa: BLE001
         print(f"[red]Audit failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+
+@app.command("eval")
+def eval_dataset(
+    dataset: Path = typer.Option(..., "--dataset", exists=True, help="JSON/JSONL cases with video_id, question, and gold evidence/answer fields."),
+    output: Optional[Path] = typer.Option(None, "--output", help="Optional JSON report path."),
+    top_k: int = typer.Option(5, "--top-k"),
+    run_answers: bool = typer.Option(False, "--run-answers", help="Also run the QA agent; otherwise evaluate retrieval only."),
+    fail_on_threshold: bool = typer.Option(False, "--fail-on-threshold"),
+) -> None:
+    _setup_logging()
+    try:
+        options = EvalOptions(top_k=top_k, run_answers=run_answers, fail_on_threshold=fail_on_threshold)
+        report = evaluate_dataset(dataset, get_settings(), options)
+        if output:
+            write_eval_report(report, output)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        if fail_on_threshold and not report.get("ok", True):
+            raise typer.Exit(code=1)
+    except typer.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        print(f"[red]Eval failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
 
 

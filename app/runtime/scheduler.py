@@ -83,7 +83,24 @@ def _is_retryable(exc: Exception, custom: Callable[[Exception], bool] | None = N
     if custom is not None:
         return custom(exc)
     text = str(exc).lower()
-    return any(marker in text for marker in ("429", "rate", "timeout", "temporarily", "503", "502", "500"))
+    return any(
+        marker in text
+        for marker in (
+            "429",
+            "rate",
+            "timeout",
+            "temporarily",
+            "503",
+            "502",
+            "500",
+            "server disconnected",
+            "connection reset",
+            "connection aborted",
+            "remote protocol",
+            "read error",
+            "connecterror",
+        )
+    )
 
 
 def _is_rate_limit(exc: Exception) -> bool:

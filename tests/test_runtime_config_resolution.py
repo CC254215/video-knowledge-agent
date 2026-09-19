@@ -13,6 +13,32 @@ def test_placeholder_api_keys_do_not_override_real_keys(monkeypatch):
 
 
 def test_faster_whisper_provider_uses_local_adapter():
-    settings = Settings(_env_file=None, ASR_PROVIDER="faster-whisper", ASR_MODEL="small")
+    settings = Settings(
+        _env_file=None,
+        ASR_PROVIDER="faster-whisper",
+        ASR_MODEL="small",
+        ASR_DEVICE="cpu",
+        ASR_COMPUTE_TYPE="int8",
+        ASR_BEAM_SIZE=1,
+        ASR_VAD_FILTER=True,
+    )
     adapter = get_asr_adapter(settings)
     assert isinstance(adapter, FasterWhisperASRAdapter)
+    assert adapter.device == "cpu"
+    assert adapter.compute_type == "int8"
+    assert adapter.beam_size == 1
+    assert adapter.vad_filter is True
+
+
+def test_faster_whisper_provider_accepts_gpu_configuration():
+    settings = Settings(
+        _env_file=None,
+        ASR_PROVIDER="faster-whisper",
+        ASR_MODEL="small",
+        ASR_DEVICE="cuda",
+        ASR_COMPUTE_TYPE="float16",
+    )
+    adapter = get_asr_adapter(settings)
+    assert isinstance(adapter, FasterWhisperASRAdapter)
+    assert adapter.device == "cuda"
+    assert adapter.compute_type == "float16"

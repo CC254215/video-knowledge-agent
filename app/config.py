@@ -2,6 +2,7 @@ from functools import lru_cache
 import logging
 import os
 from pathlib import Path
+from typing import Literal
 
 from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -21,6 +22,8 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("LLM_BASE_URL", "BIGMODEL_BASE_URL", "ZHIPU_BASE_URL", "OPENAI_BASE_URL", "OPENAI_API_BASE", "API_BASE_URL"),
     )
     llm_summary_model: str = Field(default="glm-4.6", validation_alias=AliasChoices("LLM_SUMMARY_MODEL", "SUMMARY_MODEL", "LLM_MODEL", "CHAT_MODEL"))
+    llm_thinking_mode: str = Field(default="disabled", alias="LLM_THINKING_MODE")
+    llm_max_output_tokens: int = Field(default=4096, ge=256, alias="LLM_MAX_OUTPUT_TOKENS")
     storyline_api_key: str | None = Field(default=None, validation_alias=AliasChoices("OPENAI_storyline_API_KEY", "OPENAI_STORYLINE_API_KEY"))
     storyline_base_url: str | None = Field(default=None, validation_alias=AliasChoices("OPENAI_storyline_BASE_URL", "OPENAI_STORYLINE_BASE_URL", "OPENAI_BASE_URL"))
     storyline_model: str | None = Field(default=None, validation_alias=AliasChoices("OPENAI_storyline_MODEL", "OPENAI_STORYLINE_MODEL", "LLM_MODEL"))
@@ -29,6 +32,10 @@ class Settings(BaseSettings):
     obsidian_vault_path: Path | None = Field(default=None, alias="OBSIDIAN_VAULT_PATH")
     data_dir: Path = Field(default=Path("./data"), alias="DATA_DIR")
     asr_model: str = Field(default="small", alias="ASR_MODEL")
+    asr_device: str = Field(default="auto", alias="ASR_DEVICE")
+    asr_compute_type: str = Field(default="default", alias="ASR_COMPUTE_TYPE")
+    asr_beam_size: int = Field(default=1, ge=1, alias="ASR_BEAM_SIZE")
+    asr_vad_filter: bool = Field(default=True, alias="ASR_VAD_FILTER")
     vision_api_key: str | None = Field(default=None, validation_alias=AliasChoices("VLM_API_KEY", "VISION_API_KEY", "ZHIPU_API_KEY", "OPENAI_API_KEY"))
     vision_base_url: str | None = Field(default=None, validation_alias=AliasChoices("VISION_BASE_URL", "VLM_BASE_URL"))
     vision_model: str | None = Field(default=None, validation_alias=AliasChoices("VISION_MODEL", "VLM_MODEL", "VLM_CAPTION_MODEL"))
@@ -63,6 +70,10 @@ class Settings(BaseSettings):
     chroma_path: Path = Field(default=Path("./data/chroma"), alias="CHROMA_PATH")
     ytdlp_cookies_file: Path | None = Field(default=None, alias="YTDLP_COOKIES_FILE")
     ytdlp_cookies_from_browser: str | None = Field(default=None, alias="YTDLP_COOKIES_FROM_BROWSER")
+    ytdlp_socket_timeout_seconds: float = Field(default=60.0, gt=0, alias="YTDLP_SOCKET_TIMEOUT_SECONDS")
+    ytdlp_retries: int = Field(default=10, ge=0, alias="YTDLP_RETRIES")
+    ytdlp_http_chunk_bytes: int = Field(default=10 * 1024 * 1024, ge=0, alias="YTDLP_HTTP_CHUNK_BYTES")
+    ytdlp_max_video_height: int = Field(default=720, ge=360, alias="YTDLP_MAX_VIDEO_HEIGHT")
     mempalace_provider: str = Field(default="noop", alias="MEMPALACE_PROVIDER")
     mempalace_endpoint: str | None = Field(default=None, alias="MEMPALACE_ENDPOINT")
     mempalace_api_key: str | None = Field(default=None, alias="MEMPALACE_API_KEY")
@@ -72,23 +83,35 @@ class Settings(BaseSettings):
     mempalace_timeout_seconds: float = Field(default=30.0, alias="MEMPALACE_TIMEOUT_SECONDS")
     mempalace_auto_status: bool = Field(default=True, alias="MEMPALACE_AUTO_STATUS")
     memory_promotion_enabled: bool = Field(default=True, alias="MEMORY_PROMOTION_ENABLED")
-    request_timeout_seconds: float = Field(default=240.0, alias="REQUEST_TIMEOUT_SECONDS")
+    memory_gate_mode: Literal["auto", "always", "off"] = Field(default="auto", alias="MEMORY_GATE_MODE")
+    memory_gate_model: str | None = Field(default=None, alias="MEMORY_GATE_MODEL")
+    memory_gate_timeout_seconds: float = Field(default=20.0, gt=0, alias="MEMORY_GATE_TIMEOUT_SECONDS")
+    memory_top_k: int = Field(default=4, ge=1, le=12, alias="MEMORY_TOP_K")
+    memory_context_chars: int = Field(default=4000, ge=0, alias="MEMORY_CONTEXT_CHARS")
+    memory_min_similarity: float = Field(default=0.35, ge=0, le=1, alias="MEMORY_MIN_SIMILARITY")
+    mempalace_embedding_model: str = Field(default="minilm", alias="MEMPALACE_EMBEDDING_MODEL")
+    memory_topic_model_enabled: bool = Field(default=True, alias="MEMORY_TOPIC_MODEL_ENABLED")
+    request_timeout_seconds: float = Field(default=240.0, gt=0, alias="REQUEST_TIMEOUT_SECONDS")
+    max_media_duration_seconds: float = Field(default=14_400.0, gt=0, alias="MAX_MEDIA_DURATION_SECONDS")
+    max_download_bytes: int = Field(default=4 * 1024 * 1024 * 1024, gt=0, alias="MAX_DOWNLOAD_BYTES")
+    api_max_pending_tasks: int = Field(default=16, gt=0, alias="API_MAX_PENDING_TASKS")
     pipeline_stage_restart_limit: int = Field(default=2, alias="PIPELINE_STAGE_RESTART_LIMIT")
     summary_max_segments: int = Field(default=24, alias="SUMMARY_MAX_SEGMENTS")
     summary_segment_chars: int = Field(default=500, alias="SUMMARY_SEGMENT_CHARS")
     summary_caption_chars: int = Field(default=300, alias="SUMMARY_CAPTION_CHARS")
     summary_map_concurrency: int = Field(default=1, alias="SUMMARY_MAP_CONCURRENCY")
+    entity_normalization_apply_threshold: float = Field(default=0.85, alias="ENTITY_NORMALIZATION_APPLY_THRESHOLD")
     storyline_top_k: int = Field(default=8, alias="STORYLINE_TOP_K")
     vlm_caption_concurrency: int = Field(default=3, alias="VLM_CAPTION_CONCURRENCY")
     vlm_caption_retries: int = Field(default=2, alias="VLM_CAPTION_RETRIES")
     visual_classifier_enabled: bool = Field(default=True, alias="VISUAL_CLASSIFIER_ENABLED")
     visual_strength_threshold: float = Field(default=0.48, alias="VISUAL_STRENGTH_THRESHOLD")
-    weak_visual_frame_fps: float = Field(default=0.2, alias="WEAK_VISUAL_FRAME_FPS")
+    weak_visual_frame_fps: float = Field(default=0.05, gt=0, alias="WEAK_VISUAL_FRAME_FPS")
     strong_visual_frame_fps: float = Field(default=1.0, alias="STRONG_VISUAL_FRAME_FPS")
     weak_visual_max_frames_per_segment: int = Field(default=1, alias="WEAK_VISUAL_MAX_FRAMES_PER_SEGMENT")
     strong_visual_max_frames_per_segment: int = Field(default=3, alias="STRONG_VISUAL_MAX_FRAMES_PER_SEGMENT")
     correlation_text_min_chars: int = Field(default=80, alias="CORRELATION_TEXT_MIN_CHARS")
-    correlation_sample_frames: int = Field(default=10, alias="CORRELATION_SAMPLE_FRAMES")
+    correlation_sample_frames: int = Field(default=6, ge=3, alias="CORRELATION_SAMPLE_FRAMES")
     correlation_low_threshold: float = Field(default=0.2, alias="CORRELATION_LOW_THRESHOLD")
     correlation_high_threshold: float = Field(default=0.8, alias="CORRELATION_HIGH_THRESHOLD")
     llm_max_concurrency: int = Field(default=1, alias="LLM_MAX_CONCURRENCY")
@@ -118,15 +141,15 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def normalize_runtime_secrets(self) -> "Settings":
-        if not _usable_secret(self.openai_api_key):
+        if _should_fallback_secret(self, "openai_api_key", self.openai_api_key):
             self.openai_api_key = _first_usable_env("ZHIPU_API_KEY", "OPENAI_API_KEY", "LLM_API_KEY")
-        if not _usable_secret(self.storyline_api_key):
+        if _should_fallback_secret(self, "storyline_api_key", self.storyline_api_key):
             self.storyline_api_key = _first_usable_env("OPENAI_storyline_API_KEY", "OPENAI_STORYLINE_API_KEY")
-        if not _usable_secret(self.vision_api_key):
+        if _should_fallback_secret(self, "vision_api_key", self.vision_api_key):
             self.vision_api_key = _first_usable_env("VISION_API_KEY", "VLM_API_KEY", "ZHIPU_API_KEY", "OPENAI_API_KEY", "LLM_API_KEY")
-        if not _usable_secret(self.llm_correlation_api_key):
+        if _should_fallback_secret(self, "llm_correlation_api_key", self.llm_correlation_api_key):
             self.llm_correlation_api_key = _first_usable_env("LLM_correlation_API_KEY", "LLM_CORRELATION_API_KEY", "ZHIPU_API_KEY", "VLM_API_KEY", "OPENAI_API_KEY")
-        if not _usable_secret(self.evidence_llm_api_key):
+        if _should_fallback_secret(self, "evidence_llm_api_key", self.evidence_llm_api_key):
             self.evidence_llm_api_key = _first_usable_env("evidence_LLM_correlation_API_KEY", "EVIDENCE_LLM_CORRELATION_API_KEY")
         return self
 
@@ -236,11 +259,19 @@ class Settings(BaseSettings):
             "STRICT_LLM": self.strict_llm,
             "FORCE_REFRESH": self.force_refresh,
             "REQUEST_TIMEOUT_SECONDS": self.request_timeout_seconds,
+            "LLM_THINKING_MODE": self.llm_thinking_mode,
+            "LLM_MAX_OUTPUT_TOKENS": self.llm_max_output_tokens,
             "SUMMARY_MAX_SEGMENTS": self.summary_max_segments,
             "SUMMARY_SEGMENT_CHARS": self.summary_segment_chars,
             "SUMMARY_CAPTION_CHARS": self.summary_caption_chars,
             "SUMMARY_MAP_CONCURRENCY": self.summary_map_concurrency,
             "STORYLINE_TOP_K": self.storyline_top_k,
+            "ASR_DEVICE": self.asr_device,
+            "ASR_COMPUTE_TYPE": self.asr_compute_type,
+            "ASR_BEAM_SIZE": self.asr_beam_size,
+            "WEAK_VISUAL_FRAME_FPS": self.weak_visual_frame_fps,
+            "CORRELATION_SAMPLE_FRAMES": self.correlation_sample_frames,
+            "YTDLP_MAX_VIDEO_HEIGHT": self.ytdlp_max_video_height,
             "VLM_CAPTION_CONCURRENCY": self.vlm_caption_concurrency,
             "VLM_CAPTION_RETRIES": self.vlm_caption_retries,
             "VISUAL_CLASSIFIER_ENABLED": self.visual_classifier_enabled,
@@ -294,19 +325,17 @@ def _usable_secret(value: str | None) -> bool:
     return bool(stripped and not (stripped.startswith("${") and stripped.endswith("}")))
 
 
-def _first_usable_env(*keys: str) -> str | None:
-    dotenv_values: dict[str, str | None] = {}
-    try:
-        from dotenv import dotenv_values as read_dotenv_values
+def _should_fallback_secret(settings: Settings, field_name: str, value: str | None) -> bool:
+    if _usable_secret(value):
+        return False
+    if field_name in settings.model_fields_set and value is None:
+        return False
+    return True
 
-        dotenv_values = read_dotenv_values(".env")
-    except Exception:
-        dotenv_values = {}
+
+def _first_usable_env(*keys: str) -> str | None:
     for key in keys:
         value = os.environ.get(key)
-        if _usable_secret(value):
-            return value
-        value = dotenv_values.get(key)
         if _usable_secret(value):
             return value
     return None

@@ -14,6 +14,8 @@ def format_summary_for_ui(summary: SummaryReport | None) -> str:
     for item in summary.structured_outline:
         lines.append(f"<div class='outline-item'><span class='time-chip'>{item.timestamp}</span><b>{item.topic}</b></div>")
         lines.extend(f"<div class='sub-bullet'>- {point}</div>" for point in item.key_points[:3])
+        if item.segment_ids:
+            lines.append(f"<div class='muted'>证据片段：{', '.join(_escape(segment_id) for segment_id in item.segment_ids)}</div>")
     if summary.warnings:
         lines.append("<div class='section-title warning'>Warnings</div>")
         lines.extend(f"<div class='sub-bullet'>- {warning}</div>" for warning in summary.warnings[:6])
@@ -27,13 +29,15 @@ def format_storyline_for_ui(storyline: Storyline | None) -> str:
         return "<div class='empty-card'>暂无 storyline 节点。</div>"
     lines = ["<div class='timeline'>"]
     for node in storyline.nodes:
-        timestamp = _seconds_to_ts(node.time_start)
+        timestamp = f"{_seconds_to_ts(node.time_start)} - {_seconds_to_ts(node.time_end)}"
         title = node.title or node.topic
+        evidence_count = len(set(node.evidence_segment_ids or node.speech_evidence_ids or []))
         lines.append(
             "<div class='timeline-node'>"
             f"<div class='timeline-dot'></div><div><span class='time-chip'>{timestamp}</span> "
             f"<b>{title}</b><div class='muted'>{(node.summary or node.claim)[:120]}</div>"
-            f"<div class='status-chip'>{node.status.value}</div></div></div>"
+            f"<div class='status-chip'>{node.status.value}</div>"
+            f"<span class='muted'>证据片段 {evidence_count} 个</span></div></div>"
         )
     lines.append("</div>")
     return "\n".join(lines)
@@ -69,6 +73,12 @@ def format_evidence_for_ui(answer: ConversationTurn | Any) -> str:
     for item in evidence[:10]:
         lines.append(format_single_evidence_card(item))
     lines.append("</div>")
+    historical = getattr(answer, "historical_evidence", []) or []
+    if historical:
+        lines.append("<h4>历史视频来源</h4>")
+        for item in historical:
+            lines.append(f"<p><b>{_escape(str(item.get('video_title', '')))}</b> · {_escape(str(item.get('citation_id', '')))}</p>")
+            lines.append(format_single_evidence_card({**item, "text": item.get("quote", "")}))
     lines.append("<div class='muted small'>OCR 当前禁用；证据仅来自 speech / frame / frame_caption。</div>")
     return "\n".join(lines)
 
@@ -105,19 +115,93 @@ def format_status_for_ui(result: Any) -> str:
         metadata = getattr(result, "metadata", None)
         title = getattr(metadata, "title", "") if metadata else ""
         author = getattr(metadata, "author", "") if metadata else ""
-        duration = getattr(metadata, "duration", "") if metadata else ""
+        duration = getattr(metadata, "duration", None) if metadata else None
         modality = getattr(getattr(result, "modality_profile", None), "mode", "")
-        return (
+        status = (
             "<div class='status-grid'>"
             f"<div><span>video_id</span><b>{getattr(result, 'video_id', '')}</b></div>"
             f"<div><span>标题</span><b>{_escape(title)[:80]}</b></div>"
             f"<div><span>作者</span><b>{_escape(author or '')}</b></div>"
-            f"<div><span>时长</span><b>{duration or '--'}s</b></div>"
+            f"<div><span>视频时长</span><b>{_format_duration(duration) if duration else '--'}</b></div>"
             f"<div><span>modality</span><b>{modality}</b></div>"
             f"<div><span>Obsidian</span><b>{_escape(getattr(result, 'obsidian_status', ''))}</b></div>"
             "</div>"
         )
+        return status + format_processing_timeline(getattr(result, "processing_state", None))
     return f"<div class='error-card'>处理失败：{_escape(getattr(result, 'error', 'unknown error'))}</div>"
+
+
+def format_processing_timeline(processing_state: dict[str, Any] | None) -> str:
+    if not processing_state:
+        return ""
+    stages = processing_state.get("stages") or {}
+    pipeline = stages.get("pipeline") or {}
+    total = float(pipeline.get("total_duration_seconds") or pipeline.get("duration_seconds") or 0.0)
+    rows: list[tuple[str, str, float]] = []
+    granular = [
+        ("url_metadata", "读取视频信息"),
+        ("video_download", "下载视频"),
+        ("subtitle", "获取字幕"),
+        ("audio_download", "下载 ASR 音频"),
+        ("asr", "语音识别"),
+        ("multimodal_preprocess", "抽帧与画面理解"),
+    ]
+    if any(name in stages for name, _label in granular):
+        for name, label in granular:
+            _append_timing(rows, stages, name, label)
+    else:
+        pipeline_tail = float(pipeline.get("duration_seconds") or 0.0)
+        if total > pipeline_tail:
+            rows.append(("succeeded", "摄取（下载 / ASR / 抽帧 / VLM，旧版合计）", total - pipeline_tail))
+    for name, label in (
+        ("load_metadata_transcript", "加载元数据与转写"),
+        ("multimodal", "多模态产物校验"),
+        ("index", "建立检索索引"),
+        ("summary", "生成结构化摘要"),
+        ("storyline", "生成故事线"),
+        ("persist", "持久化结果"),
+        ("export_obsidian", "导出 Obsidian"),
+    ):
+        _append_timing(rows, stages, name, label)
+    if not rows:
+        return ""
+    # A resumed run has a fresh pipeline duration but retains earlier successful
+    # stage timings. Never display a total shorter than its visible components.
+    total = max(total, sum(duration for _status, _label, duration in rows))
+    scale = max((duration for _status, _label, duration in rows), default=1.0)
+    lines = [
+        "<div class='timing-panel'>",
+        "<div class='timing-title'><b>处理耗时</b>"
+        f"<span>总计 {_format_duration(total)}</span></div>",
+    ]
+    for status, label, duration in rows:
+        width = max(2.0, min(100.0, duration * 100 / max(scale, 0.001)))
+        lines.append(
+            "<div class='timing-row'>"
+            f"<span class='timing-label'>{_escape(label)}</span>"
+            f"<div class='timing-track'><i class='timing-fill {status}' style='width:{width:.1f}%'></i></div>"
+            f"<b>{_format_duration(duration)}</b></div>"
+        )
+    lines.append("</div>")
+    return "".join(lines)
+
+
+def _append_timing(rows: list[tuple[str, str, float]], stages: dict[str, Any], name: str, label: str) -> None:
+    entry = stages.get(name)
+    if not isinstance(entry, dict) or entry.get("duration_seconds") is None:
+        return
+    rows.append((str(entry.get("status") or "unknown"), label, float(entry["duration_seconds"])))
+
+
+def _format_duration(seconds: float | None) -> str:
+    value = max(0, int(round(float(seconds or 0))))
+    hours, remainder = divmod(value, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}时{minutes:02d}分{secs:02d}秒"
+    if minutes:
+        return f"{minutes}分{secs:02d}秒"
+    return f"{secs}秒"
 
 
 def format_evidence_gallery_items(evidence: list[dict[str, Any]]) -> list[tuple[str, str]]:
@@ -130,7 +214,7 @@ def format_evidence_gallery_items(evidence: list[dict[str, Any]]) -> list[tuple[
         label = f"{item.get('timestamp', '')} · {item.get('evidence_type', 'frame')}\n{str(caption)[:120]}"
         if (path, label) not in items:
             items.append((path, label))
-    return items[:12]
+    return items
 
 
 def _seconds_to_ts(seconds: float) -> str:

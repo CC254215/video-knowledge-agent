@@ -60,6 +60,8 @@ def build_multimodal_segments(
                 start=transcript.start,
                 end=transcript.end,
                 transcript_text=transcript.text,
+                raw_transcript_text=transcript.text,
+                normalized_transcript_text=transcript.text,
                 frame_ids=[frame.frame_id for frame in segment_frames],
                 representative_frame_ids=representative_ids,
                 visual_captions=segment_captions,

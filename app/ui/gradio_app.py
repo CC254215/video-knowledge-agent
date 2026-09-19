@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import queue
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+from html import escape
 from typing import Any
 
 from app.services.aggregation_service import AggregationService
@@ -27,6 +29,17 @@ STAGE_PROGRESS = {
     "复制": 12,
     "字幕": 25,
     "ASR": 30,
+    "语音识别": 38,
+    "下载视频": 10,
+    "下载音频": 30,
+    "读取视频信息": 6,
+    "加载元数据": 55,
+    "关键帧": 58,
+    "检索索引": 70,
+    "生成摘要": 78,
+    "生成 storyline": 88,
+    "保存处理结果": 95,
+    "完成处理": 98,
     "抽帧": 45,
     "多模态": 60,
     "摘要": 72,
@@ -60,6 +73,18 @@ THEME_CSS = """
 .status-grid span { display:block; color:var(--vka-muted); font-size:12px; margin-bottom:4px; }
 .status-grid b { font-size:13px; word-break:break-word; }
 .error-card { background:#fff1f2; border:1px solid #fecdd3; border-radius:12px; padding:12px; color:#be123c; }
+.progress-shell { border:1px solid var(--vka-border); background:#fff; border-radius:8px; padding:12px; }
+.progress-head { display:flex; justify-content:space-between; gap:12px; margin-bottom:8px; font-size:13px; }
+.progress-track { height:10px; overflow:hidden; border-radius:5px; background:#e9edf3; }
+.progress-fill { height:100%; background:#ff7a00; transition:width .25s ease; }
+.timing-panel { margin-top:12px; border-top:1px solid var(--vka-border); padding-top:12px; }
+.timing-title { display:flex; justify-content:space-between; gap:12px; margin-bottom:10px; font-size:13px; }
+.timing-title span { color:var(--vka-muted); }
+.timing-row { display:grid; grid-template-columns:minmax(130px,1.5fr) minmax(100px,3fr) 82px; align-items:center; gap:10px; margin:7px 0; font-size:12px; }
+.timing-label { overflow-wrap:anywhere; }
+.timing-track { height:7px; overflow:hidden; border-radius:4px; background:#e9edf3; }
+.timing-fill { display:block; height:100%; background:#ff7a00; }
+.timing-fill.failed_retryable,.timing-fill.failed_terminal { background:#dc2626; }
 .timeline { display:flex; flex-direction:column; gap:10px; }
 .timeline-node { display:flex; gap:10px; border:1px solid var(--vka-border); border-radius:12px; padding:10px; background:#fff; }
 .timeline-dot { width:10px; height:10px; min-width:10px; border-radius:50%; background:var(--vka-orange); margin-top:6px; }
@@ -90,9 +115,19 @@ def build_app(debug: bool = False):
     chat_service = ChatService()
     aggregation_service = AggregationService()
     streaming_service = StreamingVideoService()
+    initial_result = video_service.load_latest_completed()
+    initial_state = AppState()
+    if initial_result:
+        initial_state.load_video(
+            initial_result.video_id or "",
+            metadata=initial_result.metadata,
+            summary=initial_result.summary,
+            storyline=initial_result.storyline,
+            modality_profile=initial_result.modality_profile,
+        )
 
     with gr.Blocks(title="Video Knowledge Agent") as demo:
-        state = gr.State(AppState())
+        state = gr.State(initial_state)
         with gr.Column(elem_id="vka-root"):
             gr.HTML(
                 """
@@ -134,16 +169,19 @@ def build_app(debug: bool = False):
 
                     with gr.Row():
                         with gr.Column(scale=1, elem_classes=["panel"]):
-                            progress_bar = gr.Slider(label="处理进度", value=0, minimum=0, maximum=100, interactive=False)
-                            status_box = gr.HTML(format_status_for_ui(None))
+                            progress_bar = gr.HTML(_progress_html(100, "已恢复最近完成的视频") if initial_result else _progress_html(0, "等待输入"))
+                            status_box = gr.HTML(format_status_for_ui(initial_result))
                         with gr.Column(scale=1, elem_classes=["panel"]):
-                            summary_box = gr.HTML(format_summary_for_ui(None), label="摘要")
+                            summary_box = gr.HTML(format_summary_for_ui(initial_result.summary if initial_result else None), label="摘要")
 
                     with gr.Row():
                         with gr.Column(scale=1, elem_classes=["panel"]):
-                            suggested_questions_box = gr.HTML(format_suggested_questions_for_ui(None), label="建议追问")
+                            suggested_questions_box = gr.HTML(
+                                format_suggested_questions_for_ui(initial_result.summary if initial_result else None),
+                                label="建议追问",
+                            )
                         with gr.Column(scale=1, elem_classes=["panel"]):
-                            storyline_box = gr.HTML(format_storyline_for_ui(None), label="Storyline")
+                            storyline_box = gr.HTML(format_storyline_for_ui(initial_result.storyline if initial_result else None), label="Storyline")
 
                     with gr.Column(elem_classes=["panel"]):
                         gr.Markdown("### Video Chat")
@@ -159,10 +197,16 @@ def build_app(debug: bool = False):
                         evidence_box = gr.HTML("<div class='empty-card'>回答后将在这里显示答案引用的文本片段、时间戳和帧证据。</div>")
                     with gr.Column(elem_classes=["panel"]):
                         gr.Markdown("### Evidence Frames")
-                        evidence_gallery = gr.Gallery(label=None, columns=2, height=340, object_fit="contain")
+                        evidence_gallery = gr.Gallery(
+                            value=_gallery_from_result(initial_result) if initial_result else [],
+                            label=None,
+                            columns=2,
+                            height=340,
+                            object_fit="contain",
+                        )
                     with gr.Column(elem_classes=["panel"]):
                         gr.Markdown("### Diagnostics")
-                        diagnostics_box = gr.JSON(label=None)
+                        diagnostics_box = gr.JSON(value=_diagnostics(initial_result) if initial_result else {}, label=None)
                         debug_box = gr.JSON(label="Debug Raw", visible=debug)
 
         process_btn.click(
@@ -289,7 +333,7 @@ def _stream_process_urls(service: StreamingVideoService, urls_text: str | None, 
         message = f"流式队列：完成 {batch_state.completed}，失败 {batch_state.failed}，总数 {batch_state.total}"
         yield (
             app_state,
-            percent,
+            _progress_html(percent, message),
             f"<div class='status-card'><b>{message}</b><br><span class='muted'>阶段一与后续分析分离执行。</span></div>",
             format_summary_for_ui(app_state.current_summary),
             format_storyline_for_ui(app_state.current_storyline),
@@ -338,7 +382,7 @@ def _process_video(service: VideoService, url: str | None, file_path: str | None
         app_state.fail(result.error or "处理失败")
         yield (
             app_state,
-            100,
+            _progress_html(100, "处理失败"),
             format_status_for_ui(result),
             format_summary_for_ui(None),
             format_storyline_for_ui(None),
@@ -360,7 +404,7 @@ def _process_video(service: VideoService, url: str | None, file_path: str | None
     )
     yield (
         app_state,
-        100,
+        _progress_html(100, "处理完成"),
         format_status_for_ui(result),
         format_summary_for_ui(result.summary),
         format_storyline_for_ui(result.storyline),
@@ -376,7 +420,7 @@ def _process_video(service: VideoService, url: str | None, file_path: str | None
 def _process_outputs(app_state: AppState, percent: int, message: str):
     return (
         app_state,
-        percent,
+        _progress_html(percent, message),
         f"<div class='status-card'><b>{message}</b><br><span class='muted'>处理中，请保持页面打开。</span></div>",
         format_summary_for_ui(None),
         format_storyline_for_ui(None),
@@ -413,7 +457,7 @@ def _clear_video(app_state: AppState):
     app_state.clear_video()
     return (
         app_state,
-        0,
+        _progress_html(0, "等待输入"),
         format_status_for_ui(None),
         format_summary_for_ui(None),
         format_storyline_for_ui(None),
@@ -436,10 +480,29 @@ def _format_service_error(result: ChatAnswerResult) -> str:
 
 
 def _progress_value(message: str) -> int:
+    match = re.search(r"(下载视频|下载音频|语音识别)\s+(\d+(?:\.\d+)?)%", message)
+    if match:
+        operation, raw_percent = match.groups()
+        value = max(0.0, min(100.0, float(raw_percent)))
+        ranges = {"下载视频": (10, 28), "下载音频": (30, 38), "语音识别": (38, 55)}
+        start, end = ranges[operation]
+        return round(start + (end - start) * value / 100)
     for token, value in STAGE_PROGRESS.items():
         if token.lower() in message.lower():
             return value
     return 50
+
+
+def _progress_html(percent: int, message: str) -> str:
+    value = max(0, min(100, int(percent)))
+    safe_message = escape(message)
+    return (
+        "<div class='progress-shell'>"
+        f"<div class='progress-head'><b>{value}%</b><span>{safe_message}</span></div>"
+        f"<div class='progress-track' role='progressbar' aria-valuemin='0' aria-valuemax='100' "
+        f"aria-valuenow='{value}'><div class='progress-fill' style='width:{value}%'></div></div>"
+        "</div>"
+    )
 
 
 def _gallery_from_result(result: Any) -> list[tuple[str, str]]:
@@ -465,7 +528,7 @@ def _gallery_from_evidence(evidence: list[dict]) -> list[str]:
         path = item.get("image_path")
         if path and path not in paths:
             paths.append(path)
-    return paths[:12]
+    return paths
 
 
 def _diagnostics(value: Any) -> dict[str, Any]:

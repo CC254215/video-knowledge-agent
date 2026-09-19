@@ -69,13 +69,13 @@ def test_multi_video_aggregator_exports_topics(tmp_path: Path) -> None:
         "Agent memory benefits from evidence grounded retrieval before durable memory consolidation.",
         "The speaker compares retrieval evidence and durable memory consolidation.",
     )
-    settings = Settings(data_dir=data_dir, chroma_path=tmp_path / "chroma", obsidian_vault_path=vault)
+    settings = Settings(_env_file=None, data_dir=data_dir, chroma_path=tmp_path / "chroma", obsidian_vault_path=vault)
 
     result = MultiVideoAggregator(settings=settings).run(k=1, export_obsidian=True)
 
     assert result["record_count"] == 2
     assert result["topic_count"] == 1
-    assert result["memory_saved"] == 1
+    assert result["memory_saved"] == 0  # Disabled memory cannot report successful writes.
     assert result["obsidian_paths"]
     note = Path(result["obsidian_paths"][0])
     assert note.exists()

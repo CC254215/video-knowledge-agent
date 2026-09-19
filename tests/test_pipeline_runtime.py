@@ -49,3 +49,16 @@ def test_run_stage_with_restarts_recovers_before_limit(tmp_path: Path) -> None:
     assert run_stage_with_restarts("storyline", flaky_stage, state, settings) == "ok"
     assert attempts["count"] == 2
     assert state.payload["stages"]["storyline"]["restart_count"] == 1
+
+
+def test_success_clears_stale_stage_error(tmp_path: Path) -> None:
+    state = ProcessingState(tmp_path / "video")
+    state.start("summary")
+    state.fail("summary", "temporary disconnect")
+
+    state.start("summary")
+    state.succeed("summary")
+
+    entry = state.payload["stages"]["summary"]
+    assert entry["status"] == "succeeded"
+    assert "error" not in entry

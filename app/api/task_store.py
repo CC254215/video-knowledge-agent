@@ -6,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+MAX_PROGRESS_EVENTS = 200
+
 
 class APITaskStore:
     def __init__(self, db_path: Path) -> None:
@@ -60,12 +62,14 @@ class APITaskStore:
             )
 
     def add_progress(self, task_id: str, message: str) -> None:
-        task = self.get_task(task_id)
-        if not task:
-            return
-        progress = list(task.get("progress") or [])
-        progress.append({"message": message, "created_at": _now()})
         with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT status, progress_json FROM api_tasks WHERE task_id=?", (task_id,)).fetchone()
+            if not row or row["status"] not in {"pending", "running"}:
+                return
+            progress = list(_loads(row["progress_json"], []))
+            progress.append({"message": message, "created_at": _now()})
+            progress = progress[-MAX_PROGRESS_EVENTS:]
             conn.execute(
                 "UPDATE api_tasks SET progress_json=?, updated_at=? WHERE task_id=?",
                 (_dumps(progress), _now(), task_id),
@@ -130,4 +134,3 @@ def _loads(payload: str, fallback: Any) -> Any:
 
 def _now() -> str:
     return datetime.utcnow().isoformat()
-

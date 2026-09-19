@@ -6,6 +6,7 @@ from app.ingestion.downloader import (
     _DISABLED_COOKIE_FILES,
     _apply_ytdlp_auth_opts,
     _call_ytdlp_with_cookie_fallback,
+    _first_existing,
     _is_valid_netscape_cookie_file,
     _parse_cookies_from_browser,
     classify_ytdlp_error,
@@ -107,6 +108,19 @@ def test_ytdlp_invalid_cookie_file_is_not_used_after_browser_failure(tmp_path, m
 
 def test_invalid_cookie_file_classification() -> None:
     assert classify_ytdlp_error(RuntimeError("does not look like a Netscape format cookies file")) == "invalid_cookie_file"
+
+
+def test_network_timeout_classification() -> None:
+    assert classify_ytdlp_error(RuntimeError("HTTPSConnectionPool: Read timed out")) == "network_timeout"
+
+
+def test_partial_download_is_not_treated_as_complete(tmp_path) -> None:
+    partial = tmp_path / "source_video.mp4.part"
+    partial.write_bytes(b"incomplete")
+    assert _first_existing(tmp_path, ("source_video.*",)) is None
+    complete = tmp_path / "source_video.mp4"
+    complete.write_bytes(b"complete")
+    assert _first_existing(tmp_path, ("source_video.*",)) == complete
 
 
 def test_apply_ytdlp_auth_opts_skips_env_file_mistaken_as_cookie_file(tmp_path, monkeypatch) -> None:

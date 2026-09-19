@@ -10,6 +10,8 @@ from statistics import mean
 from app.config import Settings, get_settings
 from app.models import VideoVisualProfile
 
+MEDIA_PROCESS_TIMEOUT_SECONDS = 600
+
 
 def classify_video_visual_intensity(
     video_id: str,
@@ -20,7 +22,8 @@ def classify_video_visual_intensity(
 ) -> VideoVisualProfile:
     """Lightweight visual gate before expensive multimodal processing.
 
-    This stage never calls a vision model. It samples a small number of scaled
+    This stage never calls a vision model. It samples scaled frames uniformly
+    across the full video (at the midpoint of each equal-duration interval)
     frames and computes cheap frame-diff, edge-density, color-variation, and
     metadata features. The resulting profile controls downstream frame density
     while keeping MultimodalSegment output schema unchanged.
@@ -33,6 +36,8 @@ def classify_video_visual_intensity(
     width, height, fps = _probe_video(path)
     sample_dir = Path(output_dir) / "frames" / "visual_probe"
     samples = _sample_probe_frames(path, sample_dir)
+    if len(samples) < 2:
+        return _default_profile(video_id, path, has_subtitles, settings, reason="insufficient_full_video_probe_frames")
     motion_score, complexity_score, color_score = _compute_lightweight_scores(samples)
     resolution_score = _resolution_score(width, height)
     subtitle_discount = 0.08 if has_subtitles else 0.0
@@ -60,6 +65,7 @@ def classify_video_visual_intensity(
         recommended_max_frames_per_segment=settings.strong_visual_max_frames_per_segment if visual_class == "strong_visual" else settings.weak_visual_max_frames_per_segment,
         recommended_min_representative_frames=12 if visual_class == "strong_visual" else 3,
         reason=(
+            f"sampling=uniform_full_video; samples={len(samples)}; "
             f"motion={motion_score:.2f}, complexity={complexity_score:.2f}, color={color_score:.2f}, "
             f"resolution={resolution_score:.2f}, subtitles={has_subtitles}"
         ),
@@ -100,25 +106,55 @@ def _default_profile(video_id: str, path: Path, has_subtitles: bool, settings: S
 
 
 def _sample_probe_frames(video_path: Path, output_dir: Path, max_frames: int = 12) -> list[Path]:
+    """Seek to interval midpoints instead of sampling only the opening seconds."""
     output_dir.mkdir(parents=True, exist_ok=True)
     for old in output_dir.glob("probe_*.jpg"):
         old.unlink(missing_ok=True)
-    pattern = output_dir / "probe_%04d.jpg"
+    if max_frames <= 0:
+        return []
+    duration = _probe_duration(video_path)
+    if duration is None:
+        # Do not silently treat an opening-only sample as full-video coverage.
+        return []
+    ffmpeg = _ffmpeg_executable()
+    samples: list[Path] = []
+    for index in range(max_frames):
+        timestamp = duration * ((index + 0.5) / max_frames)
+        target = output_dir / f"probe_{index:04d}.jpg"
+        command = [
+            ffmpeg, "-y", "-ss", f"{timestamp:.9f}", "-i", str(video_path),
+            "-vf", "scale=160:-1", "-frames:v", "1", "-q:v", "5", str(target),
+        ]
+        result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=MEDIA_PROCESS_TIMEOUT_SECONDS)
+        if result.returncode == 0 and target.exists():
+            samples.append(target)
+    return samples
+
+
+def _probe_duration(video_path: Path) -> float | None:
+    """Read duration, preferring the selected video stream over the container."""
     command = [
-        _ffmpeg_executable(),
-        "-y",
-        "-i",
-        str(video_path),
-        "-vf",
-        f"fps=0.25,scale=160:-1",
-        "-frames:v",
-        str(max_frames),
-        "-q:v",
-        "5",
-        str(pattern),
+        _ffprobe_executable(), "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=duration:format=duration", "-of", "json", str(video_path),
     ]
-    subprocess.run(command, capture_output=True, text=True, check=False)
-    return sorted(output_dir.glob("probe_*.jpg"))[:max_frames]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=MEDIA_PROCESS_TIMEOUT_SECONDS)
+        if result.returncode != 0:
+            return None
+        payload = json.loads(result.stdout)
+        streams = payload.get("streams") or []
+        values = [stream.get("duration") for stream in streams]
+        values.append((payload.get("format") or {}).get("duration"))
+        for value in values:
+            try:
+                duration = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(duration) and duration > 0:
+                return duration
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+    return None
 
 
 def _compute_lightweight_scores(paths: list[Path]) -> tuple[float, float, float]:
@@ -174,7 +210,7 @@ def _probe_video(path: Path) -> tuple[int | None, int | None, float | None]:
         "json",
         str(path),
     ]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=MEDIA_PROCESS_TIMEOUT_SECONDS)
     if result.returncode != 0:
         return None, None, None
     try:

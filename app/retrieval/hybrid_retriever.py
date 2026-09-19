@@ -96,6 +96,7 @@ def reciprocal_rank_fusion(
     rrf_k: int = 60,
     vector_weight: float = 1.0,
     bm25_weight: float = 1.0,
+    evidence_type_weights: dict[str, float] | None = None,
 ) -> list[RetrievedEvidence]:
     rows: dict[str, RetrievedEvidence] = {}
     scores: dict[str, float] = {}
@@ -103,11 +104,13 @@ def reciprocal_rank_fusion(
         *[_RankedResult(item, rank, "vector") for rank, item in enumerate(vector_results, start=1)],
         *[_RankedResult(item, rank, "bm25") for rank, item in enumerate(bm25_results, start=1)],
     ]
+    type_weights = evidence_type_weights or {"speech": 1.2, "frame_caption": 1.0, "frame": 0.95}
     for ranked in ranked_rows:
         evidence_id = ranked.evidence.evidence_id
         rows.setdefault(evidence_id, ranked.evidence)
         weight = vector_weight if ranked.source == "vector" else bm25_weight
-        scores[evidence_id] = scores.get(evidence_id, 0.0) + weight / (rrf_k + ranked.rank)
+        modality_weight = type_weights.get(ranked.evidence.evidence_type, 1.0)
+        scores[evidence_id] = scores.get(evidence_id, 0.0) + weight * modality_weight / (rrf_k + ranked.rank)
 
     if not scores:
         return []

@@ -39,10 +39,10 @@ class RecordingAdapter:
         pass
 
 
-def test_pipeline_saves_mempalace_summary_and_raw_evidence(monkeypatch) -> None:
+def test_pipeline_saves_mempalace_summary_and_raw_evidence(monkeypatch, tmp_path) -> None:
     adapter = RecordingAdapter()
     monkeypatch.setattr(pipeline, "create_memory_adapter", lambda settings: adapter)
-    settings = Settings(mempalace_provider="mcp_stdio")
+    settings = Settings(_env_file=None, data_dir=tmp_path, mempalace_provider="mcp_stdio")
     metadata = VideoMetadata(video_id="v1", title="Video A", author="author")
     report = SummaryReport(
         video_id="v1",

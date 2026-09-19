@@ -33,8 +33,17 @@ class EvidenceGapAgent:
         agreement: float,
         confidence: str,
         needs_visual: bool,
+        unmet_constraints: list[str] | None = None,
+        unsupported_required_facts: list[str] | None = None,
+        unsupported_decision_facts: list[str] | None = None,
     ) -> EvidenceGapDecision:
         relevance = judge_video_relevance(question, metadata, segments)
+        if not relevance["is_video_relevant"] and evidence:
+            relevance = {
+                "is_video_relevant": True,
+                "relevance_reason": "retrieved_current_video_evidence_exists",
+                "early_exit_reply": None,
+            }
         if not relevance["is_video_relevant"]:
             return EvidenceGapDecision(
                 is_video_relevant=False,
@@ -48,6 +57,12 @@ class EvidenceGapAgent:
 
         anchors = extract_time_anchors(question, metadata.duration)
         review = review_existing_evidence(question, anchors, evidence, needs_visual)
+        review["gaps"] = _unique([
+            *review["gaps"],
+            *(unmet_constraints or []),
+            *(f"unsupported_required_fact:{fact}" for fact in (unsupported_required_facts or [])),
+            *(f"unsupported_decision_fact:{fact}" for fact in (unsupported_decision_facts or [])),
+        ])
         should_refine = bool(review["gaps"]) and (agreement < 0.75 or confidence == "low" or anchors or needs_visual)
         target_ranges = build_target_ranges(anchors, evidence, segments, review["gaps"])
         reasons = list(review["gaps"])
@@ -169,7 +184,7 @@ def _asks_action_items(question: str) -> bool:
 
 def _looks_video_question(question: str) -> bool:
     return any(
-        token in question
+        token in question.lower()
         for token in (
             "视频",
             "作者",
@@ -180,9 +195,20 @@ def _looks_video_question(question: str) -> bool:
             "讲了",
             "总结",
             "核心观点",
+            "画面",
+            "图中",
+            "界面",
+            "按钮",
+            "显示",
+            "演示",
             "十分钟",
             "分钟",
             "秒",
+            "video",
+            "clip",
+            "footage",
+            "shown",
+            "happens",
         )
     )
 

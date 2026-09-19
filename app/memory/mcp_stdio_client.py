@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import shlex
 import subprocess
@@ -28,9 +29,7 @@ class MCPTool:
 class MCPStdioClient:
     """Minimal MCP JSON-RPC client over stdio.
 
-    MCP stdio messages are JSON-RPC payloads framed with a Content-Length
-    header. This client keeps one server process alive for low-latency tool
-    calls.
+    Uses newline-delimited JSON; legacy header framing is opt-in.
     """
 
     def __init__(
@@ -39,11 +38,16 @@ class MCPStdioClient:
         args: list[str] | None = None,
         timeout_seconds: float = 30.0,
         cwd: str | Path | None = None,
+        framing: str = "ndjson",
+        env: dict[str, str] | None = None,
     ) -> None:
         self.command = command
         self.args = args or []
         self.timeout_seconds = timeout_seconds
         self.cwd = str(cwd) if cwd else None
+        self.framing = framing
+        self.env = env
+        self._write_lock = threading.Lock()
         self._process: subprocess.Popen[bytes] | None = None
         self._next_id = 1
         self._pending: dict[int, queue.Queue[dict[str, Any]]] = {}
@@ -63,6 +67,7 @@ class MCPStdioClient:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env={**os.environ, **self.env} if self.env is not None else None,
             creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
         )
         self._reader_thread = threading.Thread(target=self._read_loop, name="mcp-stdio-reader", daemon=True)
@@ -133,12 +138,17 @@ class MCPStdioClient:
             return
         try:
             if process.poll() is None:
-                process.terminate()
+                if process.stdin:
+                    process.stdin.close()
                 try:
                     process.wait(timeout=3)
                 except subprocess.TimeoutExpired:
-                    process.kill()
+                    process.terminate()
+                    process.wait(timeout=3)
         finally:
+            for stream in (process.stdout, process.stderr):
+                if stream:
+                    stream.close()
             self._process = None
             self._initialized = False
 
@@ -153,10 +163,11 @@ class MCPStdioClient:
         if not process or not process.stdin or process.poll() is not None:
             raise MCPStdioError("MCP server is not running.")
         raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        frame = f"Content-Length: {len(raw)}\r\n\r\n".encode("ascii") + raw
+        frame = (f"Content-Length: {len(raw)}\r\n\r\n".encode("ascii") + raw) if self.framing == "headers" else raw + b"\n"
         try:
-            process.stdin.write(frame)
-            process.stdin.flush()
+            with self._write_lock:
+                process.stdin.write(frame)
+                process.stdin.flush()
         except BrokenPipeError as exc:
             raise MCPStdioError("MCP server stdin pipe is closed.") from exc
 
@@ -180,8 +191,9 @@ class MCPStdioClient:
 
     def _stderr_loop(self) -> None:
         assert self._process and self._process.stderr
+        stream = self._process.stderr
         while True:
-            line = self._process.stderr.readline()
+            line = stream.readline()
             if not line:
                 return
             text = line.decode("utf-8", errors="replace").strip()
@@ -211,6 +223,8 @@ def _read_mcp_message(stream) -> dict[str, Any] | None:  # type: ignore[no-untyp
         line = stream.readline()
         if not line:
             return None
+        if line.lstrip().startswith(b"{"):
+            return json.loads(line.decode("utf-8"))
         if line in {b"\r\n", b"\n"}:
             break
         key, _, value = line.decode("ascii", errors="replace").partition(":")

@@ -52,9 +52,11 @@ def test_obsidian_incremental_updates_do_not_duplicate_main_note(tmp_path: Path)
     first = write_obsidian_notes(vault, metadata, _summary(), storyline, multimodal_segments=[segment], conversation_history=[turn])
     second = write_obsidian_notes(vault, metadata, _summary(), storyline, multimodal_segments=[segment], conversation_history=[turn])
 
-    notes = list((vault / "10_Sources" / "Videos").glob("*.md"))
+    notes = list((vault / "10_Sources" / "Videos").glob("*/index.md"))
     assert len(notes) == 1
     assert first["video_note"] == second["video_note"]
     text = notes[0].read_text(encoding="utf-8")
     assert text.count("type: video-note") == 1
-    assert text.count("audit_trace_id") >= 2
+    updates = first["updates_note"].read_text(encoding="utf-8")
+    assert updates.count("audit_trace_id") >= 2
+    assert first["storyline_note"] == second["storyline_note"]

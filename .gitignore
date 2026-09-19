@@ -5,6 +5,7 @@ __pycache__/
 *.so
 .Python
 .venv/
+.venv-memory/
 venv/
 ENV/
 *.egg-info/
@@ -25,6 +26,18 @@ htmlcov/
 data/
 video/
 tmp_chroma_debug/
+
+# Local runtime logs and generated artifacts
+*.log
+tmp/
+output/
+eval/report*.md
+eval/results*.json
+.env.*
+!.env.example
+*.pem
+*.key
+cookies*.txt
 
 # Bundled ffmpeg (~100MB+); install separately or place under tools/ffmpeg per README
 tools/ffmpeg/

@@ -42,8 +42,12 @@ class ProcessTaskResponse(BaseModel):
 
 
 class AskRequest(BaseModel):
-    question: str = Field(min_length=1)
-    conversation_id: str | None = None
+    question: str = Field(min_length=1, max_length=20_000)
+    conversation_id: str | None = Field(default=None, max_length=200)
+
+
+class TaskQueueFull(RuntimeError):
+    pass
 
 
 class APIRuntime:
@@ -51,12 +55,20 @@ class APIRuntime:
         self.settings = settings or get_settings()
         self.task_store = APITaskStore(self.settings.data_dir / "vka_api_tasks.sqlite3")
         self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="vka-api-worker")
+        self._task_slots = threading.BoundedSemaphore(self.settings.api_max_pending_tasks)
 
     def submit_process(self, request: ProcessVideoRequest) -> dict[str, Any]:
+        if not self._task_slots.acquire(blocking=False):
+            raise TaskQueueFull("video processing queue is full")
         payload = request.model_dump()
         task_id = f"task_{uuid.uuid4().hex}"
-        task = self.task_store.create_task(task_id, "process_video", payload)
-        self.executor.submit(self._run_process_task, task_id, payload)
+        try:
+            task = self.task_store.create_task(task_id, "process_video", payload)
+            future = self.executor.submit(self._run_process_task, task_id, payload)
+            future.add_done_callback(lambda _future: self._task_slots.release())
+        except Exception:
+            self._task_slots.release()
+            raise
         return task
 
     def _run_process_task(self, task_id: str, payload: dict[str, Any]) -> None:
@@ -76,7 +88,8 @@ class APIRuntime:
         heartbeat_thread.start()
 
         try:
-            result = VideoService(self.settings).process_video(
+            task_settings = self.settings.model_copy(deep=True)
+            result = VideoService(task_settings).process_video(
                 url=payload.get("url"),
                 uploaded_file_path=payload.get("file_path"),
                 query=payload.get("query"),
@@ -111,7 +124,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/videos/process", response_model=ProcessTaskResponse)
     def process_video(request: ProcessVideoRequest) -> ProcessTaskResponse:
-        task = runtime.submit_process(request)
+        try:
+            task = runtime.submit_process(request)
+        except TaskQueueFull as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
         return ProcessTaskResponse(
             task_id=task["task_id"],
             status=task["status"],

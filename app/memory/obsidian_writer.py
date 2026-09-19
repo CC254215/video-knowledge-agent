@@ -142,31 +142,156 @@ def write_obsidian_notes(
     multimodal_segments: list[MultimodalSegment] | None = None,
     conversation_history: list[ConversationTurn] | None = None,
 ) -> dict[str, Path | str]:
-    # Modified file: app/memory/obsidian_writer.py
-    # Feature module: incremental Obsidian updates with audit trace blocks.
-    # Rollback policy: write new content to a temporary file first, then replace atomically.
     ensure_vault_dirs(vault_path)
-    date = datetime.utcnow().strftime("%Y-%m-%d")
-    title = safe_filename(metadata.title)
     audit_trace_id = f"audit-{uuid.uuid4().hex[:12]}"
-    video_note = _find_existing_video_note(vault_path, metadata.video_id) or (vault_path / "10_Sources/Videos" / f"{date} - {title}.md")
-    storyline_note = _unique_path(
-        vault_path / "30_Storylines" / f"{date} - {title} - storyline.md",
-        metadata.video_id,
-    )
-    if video_note.exists():
-        _append_incremental_block(video_note, audit_trace_id, multimodal_segments or [], conversation_history or [])
+    video_folder = _video_export_dir(vault_path, metadata)
+    video_folder.mkdir(parents=True, exist_ok=True)
+
+    video_note = video_folder / "index.md"
+    storyline_note = video_folder / "storyline.md"
+    evidence_note = video_folder / "evidence.md"
+    qa_note = video_folder / "qa.md"
+    updates_note = video_folder / "updates.md"
+    legacy_storyline_link = vault_path / "30_Storylines" / f"{metadata.video_id} - {safe_filename(metadata.title)}.md"
+
+    _atomic_write(video_note, render_video_note(metadata, summary, storyline, qa_history, multimodal_segments, conversation_history))
+    _atomic_write(storyline_note, render_storyline_note(metadata, storyline))
+    _atomic_write(evidence_note, render_evidence_note(metadata, multimodal_segments or []))
+    _atomic_write(qa_note, render_qa_note(metadata, qa_history, conversation_history))
+    _append_update_block(updates_note, audit_trace_id, multimodal_segments or [], conversation_history or [])
+    _atomic_write(legacy_storyline_link, _storyline_pointer(metadata, storyline_note))
+    _update_video_index(vault_path, metadata, video_note)
+
+    return {
+        "video_note": video_note,
+        "storyline_note": storyline_note,
+        "evidence_note": evidence_note,
+        "qa_note": qa_note,
+        "updates_note": updates_note,
+        "video_dir": video_folder,
+        "audit_trace_id": audit_trace_id,
+    }
+
+
+def _video_export_dir(vault_path: Path, metadata: VideoMetadata) -> Path:
+    title = safe_filename(metadata.title, max_len=80)
+    return vault_path / "10_Sources" / "Videos" / f"{metadata.video_id} - {title}"
+
+
+def render_evidence_note(metadata: VideoMetadata, multimodal_segments: list[MultimodalSegment]) -> str:
+    lines = [
+        "---",
+        "type: video-evidence",
+        f"video_id: {metadata.video_id}",
+        f"source: {metadata.source}",
+        f"url: {metadata.url or ''}",
+        f"updated_at: {datetime.utcnow().isoformat()}",
+        "---",
+        "",
+        f"# {metadata.title} - Evidence",
+        "",
+        "## Segments",
+        "",
+    ]
+    for segment in multimodal_segments:
+        lines.append(f"### {format_timestamp(segment.start)} `{segment.segment_id}`")
+        lines.append("")
+        lines.append(f"- time_range: {format_timestamp(segment.start)} - {format_timestamp(segment.end)}")
+        lines.append(f"- evidence_types: {', '.join(segment.evidence_types)}")
+        if segment.transcript_text.strip():
+            lines.extend(["", "Speech:", "", segment.transcript_text.strip(), ""])
+        if segment.representative_frame_ids:
+            lines.append(f"- representative_frames: {', '.join(segment.representative_frame_ids)}")
+        for caption in segment.visual_captions:
+            if caption.caption.strip():
+                lines.append(f"- frame_caption {format_timestamp(caption.timestamp)} `{caption.frame_id}`: {caption.caption}")
+                if caption.image_path:
+                    lines.append(f"  - image: {caption.image_path}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_qa_note(
+    metadata: VideoMetadata,
+    qa_history: list[QAAnswer] | None = None,
+    conversation_history: list[ConversationTurn] | None = None,
+) -> str:
+    lines = [
+        "---",
+        "type: video-qa",
+        f"video_id: {metadata.video_id}",
+        f"source: {metadata.source}",
+        f"url: {metadata.url or ''}",
+        f"updated_at: {datetime.utcnow().isoformat()}",
+        "---",
+        "",
+        f"# {metadata.title} - Q&A",
+        "",
+    ]
+    if conversation_history:
+        for turn in conversation_history:
+            lines.append(f"## Q: {turn.user_question}")
+            lines.append("")
+            lines.append(turn.answer)
+            lines.append("")
+            lines.append(f"- evidence: {', '.join(turn.evidence_ids)}")
+            lines.append(f"- confidence: {turn.confidence.value}")
+            lines.append(f"- created_at: {turn.created_at.isoformat()}")
+            lines.append("")
+    elif qa_history:
+        for answer in qa_history:
+            lines.append(f"## Q: {answer.question}")
+            lines.append("")
+            lines.append(answer.answer)
+            lines.append("")
+            lines.append(f"- evidence: {', '.join(answer.evidence_segment_ids)}")
+            lines.append(f"- confidence: {answer.confidence.value}")
+            lines.append("")
     else:
-        _atomic_write(
-            video_note,
-            render_video_note(metadata, summary, storyline, qa_history, multimodal_segments, conversation_history)
-            + _incremental_block(audit_trace_id, multimodal_segments or [], conversation_history or []),
-        )
-    storyline_note.write_text(render_storyline_note(metadata, storyline), encoding="utf-8")
-    return {"video_note": video_note, "storyline_note": storyline_note, "audit_trace_id": audit_trace_id}
+        lines.append("_No Q&A exported yet._")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _storyline_pointer(metadata: VideoMetadata, storyline_note: Path) -> str:
+    return "\n".join(
+        [
+            "---",
+            "type: video-storyline-pointer",
+            f"video_id: {metadata.video_id}",
+            f"updated_at: {datetime.utcnow().isoformat()}",
+            "---",
+            "",
+            f"# {metadata.title} - Storyline",
+            "",
+            f"Canonical note: [[{storyline_note.parent.name}/storyline|storyline]]",
+            "",
+        ]
+    )
+
+
+def _update_video_index(vault_path: Path, metadata: VideoMetadata, video_note: Path) -> None:
+    index_path = vault_path / "40_MOCs" / "Video Index.md"
+    entry = f"- [[{video_note.parent.name}/index|{metadata.title}]] `video_id={metadata.video_id}` source={metadata.source} duration={metadata.duration or ''}"
+    existing_lines: list[str] = []
+    if index_path.exists():
+        existing_lines = index_path.read_text(encoding="utf-8").splitlines()
+    else:
+        existing_lines = ["# Video Index", ""]
+    filtered = [line for line in existing_lines if f"video_id={metadata.video_id}`" not in line]
+    if filtered and filtered[-1].strip():
+        filtered.append("")
+    filtered.append(entry)
+    _atomic_write(index_path, "\n".join(filtered).rstrip() + "\n")
 
 
 def _find_existing_video_note(vault_path: Path, video_id: str) -> Path | None:
+    for path in (vault_path / "10_Sources" / "Videos").glob("*/index.md"):
+        try:
+            if f"video_id: {video_id}" in path.read_text(encoding="utf-8"):
+                return path
+        except OSError:
+            continue
     for path in (vault_path / "10_Sources" / "Videos").glob("*.md"):
         try:
             if f"video_id: {video_id}" in path.read_text(encoding="utf-8"):
@@ -174,6 +299,22 @@ def _find_existing_video_note(vault_path: Path, video_id: str) -> Path | None:
         except OSError:
             continue
     return None
+
+
+def _append_update_block(
+    updates_note: Path,
+    audit_trace_id: str,
+    multimodal_segments: list[MultimodalSegment],
+    conversation_history: list[ConversationTurn],
+) -> None:
+    current = updates_note.read_text(encoding="utf-8") if updates_note.exists() else _updates_header()
+    if audit_trace_id in current:
+        return
+    _atomic_write(updates_note, current.rstrip() + "\n\n" + _incremental_block(audit_trace_id, multimodal_segments, conversation_history))
+
+
+def _updates_header() -> str:
+    return "---\ntype: video-updates\n---\n\n# Updates\n"
 
 
 def _append_incremental_block(

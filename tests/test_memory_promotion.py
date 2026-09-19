@@ -9,6 +9,10 @@ from app.models import ConfidenceLevel, ConversationTurn, VideoMetadata
 class RecordingAdapter:
     def __init__(self) -> None:
         self.derived = []
+        self.conversations = []
+
+    def save_conversation_turn(self, payload):
+        self.conversations.append(payload)
 
     def save_derived_insight(self, payload):
         self.derived.append(payload)
@@ -41,6 +45,8 @@ def test_promote_conversation_turn_saves_grounded_answer(monkeypatch) -> None:
     )
 
     assert result.status == "saved"
+    assert result.memory_type == "conversation_turn+derived_insight"
+    assert adapter.conversations[0]["content"] == "User:\nWhat is the core point?\n\nAssistant:\nThe core point is grounded in evidence."
     assert adapter.derived
     payload = adapter.derived[0]
     assert payload["memory_type"] == "derived_insight"
@@ -59,8 +65,10 @@ def test_promote_conversation_turn_skips_low_confidence(monkeypatch) -> None:
         Settings(_env_file=None, mempalace_provider="mcp_stdio", mempalace_auto_status=False),
     )
 
-    assert result.status == "skipped"
-    assert result.reason == "turn_not_eligible"
+    assert result.status == "saved"
+    assert result.memory_type == "conversation_turn"
+    assert result.reason == "raw_conversation_saved;derived_insight_not_eligible"
+    assert len(adapter.conversations) == 1
     assert adapter.derived == []
 
 

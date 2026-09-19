@@ -41,6 +41,18 @@ class VideoMetadata(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class CanonicalEntity(BaseModel):
+    """A video-level canonical name with auditable ASR aliases."""
+
+    canonical: str
+    aliases: list[str] = Field(default_factory=list)
+    entity_type: str | None = None
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    evidence_sources: list[str] = Field(default_factory=list)
+    reason: str | None = None
+    needs_review: bool = False
+
+
 class TranscriptSegment(BaseModel):
     segment_id: str
     start: float
@@ -150,6 +162,8 @@ class RetrievedEvidence(BaseModel):
     image_path: str | None = None
     timestamp: float | None = None
     score: float = 0.0
+    raw_text: str | None = None
+    normalized_text: str | None = None
 
 
 class VideoFrame(BaseModel):
@@ -197,6 +211,8 @@ class VideoCorrelationProfile(BaseModel):
     representative_frame_strategy: Literal["random", "default"]
     relevance_level: Literal["low", "medium", "high", "text_only"]
     status: Literal["success", "video_unavailable", "text_too_short", "missing_model", "failed"]
+    correlation_available: bool = True
+    fallback_reason: str | None = None
     reason: str = ""
 
 
@@ -223,6 +239,13 @@ class MultimodalSegment(BaseModel):
     start: float
     end: float
     transcript_text: str = ""
+    # transcript_text remains the retrieval/display text for backwards compatibility.
+    # raw_transcript_text is immutable source evidence; normalized_transcript_text is
+    # the derived, retrieval-friendly representation.
+    raw_transcript_text: str = ""
+    normalized_transcript_text: str = ""
+    normalization_applied: bool = False
+    replacements: list[dict[str, Any]] = Field(default_factory=list)
     frame_ids: list[str] = Field(default_factory=list)
     representative_frame_ids: list[str] = Field(default_factory=list)
     visual_captions: list[FrameCaption] = Field(default_factory=list)
@@ -318,7 +341,175 @@ class EvidenceGapDecision(BaseModel):
     round_traces: list[str] = Field(default_factory=list)
 
 
+TaskType = Literal["factual", "summary", "explanation", "comparison", "evidence_check", "critique", "action_items", "procedure"]
+TemporalScope = Literal["none", "point", "interval", "event_local", "whole_video"]
+TemporalRelation = Literal["none", "before_after", "sequence", "stage", "transition"]
+ContentModality = Literal["speech", "visual"]
+
+
+class TimeConstraint(BaseModel):
+    start: float = Field(ge=0.0)
+    end: float = Field(ge=0.0)
+    source_text: str
+
+    @field_validator("end")
+    @classmethod
+    def time_constraint_end_must_not_precede_start(cls, value: float, info: Any) -> float:
+        start = info.data.get("start")
+        if start is not None and value < start:
+            raise ValueError("time constraint end must be greater than or equal to start")
+        return value
+
+
+class RuleHints(BaseModel):
+    possible_temporal_relation: TemporalRelation = "none"
+    explicit_visual_reference: bool = False
+    explicit_speech_reference: bool = False
+    confidence: Literal["low", "medium", "high"] = "low"
+
+
+class DeterministicQuestionContext(BaseModel):
+    video_title: str = ""
+    video_duration: float | None = None
+    has_real_speech: bool = False
+    has_audio: bool | None = None
+    choice_based: bool = False
+    explicit_whole_video: bool = False
+    choices: list[str] = Field(default_factory=list)
+    explicit_timestamps: list[TimeConstraint] = Field(default_factory=list)
+    explicit_intervals: list[TimeConstraint] = Field(default_factory=list)
+    transcript_preview: str = ""
+    rule_hints: RuleHints = Field(default_factory=RuleHints)
+
+
+class QuestionAnalysis(BaseModel):
+    task_type: TaskType = "factual"
+    temporal_scope: TemporalScope = "none"
+    temporal_relation: TemporalRelation = "none"
+    answer_target: str = ""
+    content_modalities: list[ContentModality] = Field(default_factory=list)
+    choice_based: bool = False
+    reason: str = ""
+    analysis_method: Literal["llm", "fallback"] = "fallback"
+
+    @field_validator("content_modalities")
+    @classmethod
+    def unique_modalities(cls, value: list[ContentModality]) -> list[ContentModality]:
+        return list(dict.fromkeys(value))
+
+
+class RequiredFact(BaseModel):
+    fact: str
+    modality: ContentModality
+
+
+class ClaimRequirement(BaseModel):
+    id: str
+    description: str
+    required: bool = True
+    support_requirement: Literal["direct", "derived", "either"] = "either"
+    preferred_modalities: list[str] = Field(default_factory=list)
+    importance: Literal["core", "supporting", "optional"] = "core"
+
+
+class RelationRequirement(BaseModel):
+    id: str
+    subject_claim_id: str | None = None
+    object_claim_id: str | None = None
+    description: str
+    relation_type: Literal[
+        "before", "after", "causes", "explains", "compares", "differs_from",
+        "part_of", "same_as", "other",
+    ] = "other"
+    required: bool = True
+
+
+class ScopeRequirement(BaseModel):
+    target: Literal["local", "relevant_evidence", "multi_event", "whole_video"] = "local"
+    completeness: Literal["none", "best_effort", "strict"] = "none"
+    allow_partial_answer: bool = True
+    description: str | None = None
+
+
+class ClaimSupportResult(BaseModel):
+    claim_id: str
+    claim: str
+    status: Literal["supported", "partial", "unsupported", "contradicted", "unknown"]
+    evidence_ids: list[str] = Field(default_factory=list)
+    reason: str = ""
+    confidence: ConfidenceLevel | None = None
+
+
+class RelationSupportResult(BaseModel):
+    relation_id: str
+    status: Literal["supported", "partial", "unsupported", "contradicted", "unknown"]
+    evidence_ids: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class ScopeAssessment(BaseModel):
+    status: Literal["complete", "probably_complete", "incomplete", "unknown", "not_applicable"]
+    requirement: ScopeRequirement
+    evidence_coverage_reason: str = ""
+    missing_scope: list[str] = Field(default_factory=list)
+
+
+class EvidenceGateResult(BaseModel):
+    status: Literal["fully_supported", "supported_with_scope_limit", "needs_refinement", "insufficient"]
+    claim_results: list[ClaimSupportResult] = Field(default_factory=list)
+    relation_results: list[RelationSupportResult] = Field(default_factory=list)
+    scope_assessment: ScopeAssessment
+    missing_requirements: list[str] = Field(default_factory=list)
+    refinement_targets: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class EvidencePlan(BaseModel):
+    required_modalities: list[ContentModality] = Field(default_factory=list)
+    required_facts: list[RequiredFact] = Field(default_factory=list)
+    decision_facts: list[str] = Field(default_factory=list)
+    min_distinct_timestamps: int = Field(default=1, ge=0)
+    requires_temporal_order: bool = False
+    requires_global_coverage: bool = False
+    requires_visual_identity: bool = False
+    human_readable_requirements: list[str] = Field(default_factory=list)
+    reason: str = ""
+    planning_method: Literal["llm", "fallback"] = "fallback"
+    claims: list[ClaimRequirement] = Field(default_factory=list)
+    relations: list[RelationRequirement] = Field(default_factory=list)
+    scope: ScopeRequirement = Field(default_factory=ScopeRequirement)
+
+    @field_validator("required_modalities")
+    @classmethod
+    def unique_required_modalities(cls, value: list[ContentModality]) -> list[ContentModality]:
+        return list(dict.fromkeys(value))
+
+
+class RefinementDiagnostics(BaseModel):
+    """Structured diagnosis of a refinement attempt.
+
+    Coverage describes where we looked; grounding describes whether the
+    observations actually support the requested facts.  They are deliberately
+    separate so broad sampling cannot masquerade as semantic proof.
+    """
+
+    sampling_coverage: Literal["sufficient", "partial", "insufficient", "not_applicable"] = "not_applicable"
+    visual_fact_grounding: Literal["sufficient", "partial", "insufficient", "not_applicable"] = "not_applicable"
+    temporal_fact_grounding: Literal["sufficient", "partial", "insufficient", "not_applicable"] = "not_applicable"
+    missing_fact_types: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class RetrievalPlan(BaseModel):
+    queries: list[str] = Field(default_factory=list)
+    evidence_types: list[EvidenceType] = Field(default_factory=list)
+    time_constraints: list[TimeConstraint] = Field(default_factory=list)
+    reason: str = ""
+
+
 class ResolvedIntent(BaseModel):
+    """Legacy compatibility view over QuestionAnalysis and EvidencePlan."""
+
     original_question: str
     rewritten_question: str
     question_type: str
@@ -329,6 +520,15 @@ class ResolvedIntent(BaseModel):
     can_use_general_knowledge: bool = False
     general_knowledge_policy: str = "only_after_video_evidence_and_clearly_labeled"
     reason: str = ""
+    temporal_scope: TemporalScope = "none"
+    temporal_relation: TemporalRelation = "none"
+    evidence_requirements: list[str] = Field(default_factory=list)
+    distinguishing_facts: list[str] = Field(default_factory=list)
+    min_distinct_visual_timestamps: int = 0
+    resolution_method: str = "rules"
+    deterministic_context: DeterministicQuestionContext | None = None
+    question_analysis: QuestionAnalysis | None = None
+    evidence_plan: EvidencePlan | None = None
 
 
 class PartialPipelineRestartResult(BaseModel):
@@ -338,6 +538,8 @@ class PartialPipelineRestartResult(BaseModel):
     added_captions: int = 0
     added_evidence_ids: list[str] = Field(default_factory=list)
     status: str = "unknown"
+    refinement_strategy: str = "local_first"
+    refined_frame_count: int = 0
 
 
 class OutlineItem(BaseModel):
@@ -380,6 +582,7 @@ class SummaryReport(BaseModel):
     num_chunks: int = 1
     chunk_summary_ids: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    canonical_entities: list[CanonicalEntity] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -411,8 +614,12 @@ class QAAnswer(BaseModel):
 class ConversationTurn(BaseModel):
     turn_id: str
     video_id: str
+    conversation_id: str | None = None
     user_question: str
     answer: str
+    current_video_answer: str = ""
+    historical_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    background_knowledge: list[str] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
     evidence: list[dict[str, Any]] = Field(default_factory=list)
     timestamps: list[str] = Field(default_factory=list)
@@ -425,7 +632,19 @@ class ConversationTurn(BaseModel):
     dpp_details: dict[str, Any] = Field(default_factory=dict)
     needs_visual_check: bool
     reason: str
+    question_analysis: QuestionAnalysis | None = None
+    evidence_plan: EvidencePlan | None = None
+    structured_evidence_gate: dict[str, list[str]] = Field(
+        default_factory=lambda: {"satisfied_constraints": [], "unmet_constraints": []}
+    )
+    fact_support: list[dict[str, Any]] = Field(default_factory=list)
+    missing_requirements: list[str] = Field(default_factory=list)
+    evidence_sufficient: bool = True
+    stop_reason: str = ""
+    refinement_diagnostics: RefinementDiagnostics = Field(default_factory=RefinementDiagnostics)
     suggested_followup_questions: list[str] = Field(default_factory=list)
+    candidate_claims: list[dict[str, Any]] = Field(default_factory=list)
+    evidence_gate_result: EvidenceGateResult | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

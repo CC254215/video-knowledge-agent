@@ -29,19 +29,25 @@ def promote_conversation_turn(
         return MemoryPromotionResult(status="skipped", reason="memory_promotion_disabled", provider=settings.mempalace_provider)
     if settings.mempalace_provider.lower() == "noop":
         return MemoryPromotionResult(status="skipped", reason="mempalace_provider_noop", provider=settings.mempalace_provider)
-    if not _eligible_for_promotion(turn):
-        return MemoryPromotionResult(status="skipped", reason="turn_not_eligible", provider=settings.mempalace_provider)
-
     adapter = None
     try:
         adapter = create_memory_adapter(settings)
+        # MemPalace's memory model is verbatim drawers.  Every completed
+        # exchange is therefore filed, independently of whether its generated
+        # answer is reliable enough to promote as a reusable insight.
+        adapter.save_conversation_turn(_conversation_payload(turn, metadata))
+        if not _eligible_for_promotion(turn):
+            return MemoryPromotionResult(status="saved", memory_type="conversation_turn",
+                                         reason="raw_conversation_saved;derived_insight_not_eligible",
+                                         provider=settings.mempalace_provider)
         payload = _payload_for_turn(turn, metadata, trace_id)
         save = getattr(adapter, "save_derived_insight", None)
         if callable(save):
             save(payload)
         else:
             adapter.save_model_summary(payload)
-        return MemoryPromotionResult(status="saved", provider=settings.mempalace_provider)
+        return MemoryPromotionResult(status="saved", memory_type="conversation_turn+derived_insight",
+                                     provider=settings.mempalace_provider)
     except Exception as exc:  # noqa: BLE001
         return MemoryPromotionResult(status="failed", reason=str(exc), provider=settings.mempalace_provider)
     finally:
@@ -70,7 +76,9 @@ def _payload_for_turn(turn: ConversationTurn, metadata: VideoMetadata, trace_id:
         "author": metadata.author,
         "trace_id": trace_id,
         "question": turn.user_question,
-        "answer": turn.answer,
+        "answer": turn.current_video_answer or turn.answer,
+        "status": "derived_unverified",
+        "excluded_from_factual_retrieval": True,
         "confidence": turn.confidence.value,
         "agreement_score": turn.agreement_score,
         "evidence_ids": turn.evidence_ids,
@@ -91,4 +99,16 @@ def _payload_for_turn(turn: ConversationTurn, metadata: VideoMetadata, trace_id:
             for item in turn.evidence[:8]
         ],
         "usage_rule": "Long-term memory only. It may guide future context, but current-video factual claims still require fresh video evidence.",
+    }
+
+
+def _conversation_payload(turn: ConversationTurn, metadata: VideoMetadata) -> dict[str, Any]:
+    """Return the exact exchange text for MemPalace's verbatim drawer API."""
+    answer = turn.current_video_answer or turn.answer
+    return {
+        "video_id": turn.video_id,
+        "room": f"conversation:{turn.video_id}",
+        "source_file": f"conversation/{turn.conversation_id or turn.video_id}/{turn.turn_id}.jsonl",
+        "content": f"User:\n{turn.user_question}\n\nAssistant:\n{answer}",
+        "video_title": metadata.title,
     }

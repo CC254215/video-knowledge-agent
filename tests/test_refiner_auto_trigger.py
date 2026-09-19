@@ -21,7 +21,14 @@ def test_visual_low_agreement_triggers_refiner_once(monkeypatch, tmp_path: Path)
         return original(self, video_id, question, target_time_range, segments, max_new_frames=max_new_frames)
 
     monkeypatch.setattr(FrameEvidenceRefiner, "refine", fake_refine)
-    turn = ConversationAgent("v1", tmp_path, settings=Settings(_env_file=None)).answer("视频里这一步是怎么演示的？")
+    offline_settings = Settings(
+        _env_file=None,
+        openai_api_key=None,
+        vision_api_key=None,
+        llm_correlation_api_key=None,
+        evidence_llm_api_key=None,
+    )
+    turn = ConversationAgent("v1", tmp_path, settings=offline_settings).answer("视频里这一步是怎么演示的？")
 
     assert calls["count"] == 1
     updated = load_multimodal_segments(tmp_path / "multimodal_segments.json")

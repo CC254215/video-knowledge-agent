@@ -1,43 +1,71 @@
 ﻿# Video Knowledge Agent
 
-**English:** A local-first pipeline that turns long-form video into structured, citeable knowledge: multimodal segments, summaries, query-guided storylines, hybrid retrieval, and grounded Q&A—without treating the project as a generic “video summarizer.”
+本项目是一个本地优先的多模态视频知识 Agent。它把长视频处理成带时间范围、证据类型和来源标识的知识单元，支持混合检索、查询驱动叙事和证据约束问答。
 
-**中文：** 本地优先的视频知识化 Agent：将视频处理为可追溯的多模态证据、摘要与叙事线，支持向量检索与有据可依的问答；当前阶段以 **`speech`（字幕/ASR）**、**`frame`（关键帧）**、**`frame_caption`（视觉描述）** 三类证据为主，**OCR 已按策略关闭**。
+项目关注的是“回答是否被视频证据支持”，而不只是生成一段摘要。当前主要使用 **`speech`（字幕/ASR）**、**`frame`（关键帧）**、**`frame_caption`（视觉描述）** 三类证据，OCR 默认关闭。
+
+## 项目亮点
+
+- **多模态证据对齐**：将语音、关键帧和视觉描述对齐到统一的时间段，形成可追溯的 `multimodal_segments`。
+- **混合检索**：结合 BM25 的词法匹配和 Chroma 的向量检索，兼顾专有名词、时间表达和语义相似度。
+- **多样性证据选择**：使用 DPP 风格的选择策略减少重复片段，避免问答只返回相邻的 Top-K 结果。
+- **证据缺口规划**：当已有证据不足以回答问题时，自动判断缺失的时间范围和模态，并触发定向关键帧补采样。
+- **有据可依的回答契约**：回答携带证据 ID、时间戳、证据类型、置信度和视觉核验状态；无法支持的结论会被标记为不确定。
+- **可恢复处理流水线**：按阶段记录状态，支持失败重试、限流、断点续跑和阶段级重启。
+- **工程化接口**：同时提供 Typer CLI、Gradio Web UI 和 FastAPI 服务接口，并配套评测和回归测试。
+
+## 证据处理流程
+
+系统把视频理解拆成一条可检查的证据链：
+
+```text
+视频/URL
+  → 下载与转写
+  → 关键帧采样与视觉描述
+  → 多模态时间段对齐
+  → BM25 + 向量索引
+  → 证据规划与多样性选择
+  → 摘要 / Storyline / 问答
+  → 时间戳与证据引用
+```
+
+问答阶段会先判断问题需要哪些证据，再检索和验证。证据不足时，系统会保留不确定性，而不是用模型常识补齐视频中没有出现的事实。
 
 ---
 
-## Table of contents
+## 目录
 
-- [Capabilities](#capabilities)
-- [Architecture snapshot](#architecture-snapshot)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Quick start](#quick-start)
-- [Configuration](#configuration)
-- [Typical workflows](#typical-workflows)
-- [Optional integrations](#optional-integrations)
-- [Artifacts & data layout](#artifacts--data-layout)
-- [Throughput, retries & resume](#throughput-retries--resume)
-- [Verification & diagnostics](#verification--diagnostics)
-- [Development](#development)
-- [Limitations](#limitations)
-- [Repository layout](#repository-layout)
+- [核心能力](#核心能力)
+- [架构概览](#架构概览)
+- [环境要求](#环境要求)
+- [安装](#安装)
+- [快速开始](#快速开始)
+- [配置](#配置)
+- [典型流程](#典型流程)
+- [可选集成](#可选集成)
+- [产物与数据目录](#产物与数据目录)
+- [限流、重试与断点续跑](#限流重试与断点续跑)
+- [验证与诊断](#验证与诊断)
+- [评测](#评测)
+- [开发与测试](#开发与测试)
+- [当前限制](#当前限制)
+- [仓库结构](#仓库结构)
 
 ---
 
-## Capabilities
+## 核心能力
 
-| Area | What you get |
+| 模块 | 能力 |
 |------|----------------|
-| **Ingestion** | Public URLs (via yt-dlp), local video/audio files; metadata and transcript-first strategy with optional **local ASR** (`faster-whisper`, optional extra). |
-| **Multimodal evidence** | Segment-aligned speech, representative frames, VLM captions; deduping and modality routing; artifacts persisted under `data/videos/{video_id}/`. |
-| **Understanding** | LLM summaries (incl. map–reduce for long videos), 30s overview, structured outline, query-guided **Storyline** with grounded node checks. |
-| **Retrieval** | ChromaDB persistent store (default under `data/chroma/`), hybrid / DPP-style evidence selection, agreement signals for confidence. |
-| **Interfaces** | **Gradio** Web UI (`cli.py`), **Typer** CLI (`app.cli` / `src.cli` shim), **FastAPI** server (`api.py`). |
+| **视频接入** | 支持 yt-dlp URL 下载和本地音视频；优先使用字幕，无字幕时可使用 faster-whisper 本地转写。 |
+| **多模态证据** | 对齐语音、代表帧和视觉描述；支持去重与模态路由，产物保存在 `data/videos/{video_id}/`。 |
+| **内容理解** | 长视频分段归纳、概览、结构化大纲、查询驱动 Storyline，以及节点级证据支持检查。 |
+| **检索** | Chroma 持久化索引、BM25 混合检索、DPP 风格证据选择和一致性信号。 |
+| **交互接口** | Gradio 网页、Typer 命令行和 FastAPI 服务。 |
 
 ---
 
-## Architecture snapshot
+## 架构概览
 
 ```text
 URL / file → ingest (yt-dlp + ffmpeg) → transcript & segments
@@ -46,11 +74,11 @@ URL / file → ingest (yt-dlp + ffmpeg) → transcript & segments
     → QA / chat (evidence-bound answers)
 ```
 
-Design principle: **answers must be supported by on-video evidence**; when evidence is insufficient, the system should state that explicitly rather than inventing facts.
+设计原则：**视频事实必须有对应证据支持**；证据不足时明确说明。长期记忆作为背景信息单独处理，不替代当前视频证据。
 
 ---
 
-## Requirements
+## 环境要求
 
 - **Python** 3.11+（若系统默认 `python` 指向 3.10，请使用 `py -3.11`。）
 - **ffmpeg** 在 `PATH` 中（真实 URL 下载与音视频处理依赖）。
@@ -67,7 +95,7 @@ Design principle: **answers must be supported by on-video evidence**; when evide
 
 ---
 
-## Installation
+## 安装
 
 ```powershell
 cd <project_root>
@@ -88,7 +116,7 @@ py -3.11 -m pip install -e ".[dev]"
 
 ---
 
-## Quick start
+## 快速开始
 
 ### Web UI（Gradio）
 
@@ -132,7 +160,7 @@ py -3.11 -m app.cli show-config
 
 ---
 
-## Configuration
+## 配置
 
 1. 复制环境变量模板：
 
@@ -186,7 +214,7 @@ STORYLINE_TOP_K=16
 
 ---
 
-## Typical workflows
+## 典型流程
 
 ### 处理公开 URL
 
@@ -209,14 +237,18 @@ py -3.11 -m app.cli ask --video-id "<video_id>" --question "……"
 
 ---
 
-## Optional integrations
+## 可选集成
 
 ### Obsidian
 
 配置 **`OBSIDIAN_VAULT_PATH`** 后，处理完成可尝试导出（具体路径规则见实现与 `COMPLETED_FEATURES.md`），例如：
 
-- `10_Sources/Videos/{date} - {safe_title}.md`
-- `30_Storylines/{date} - {safe_title} - storyline.md`
+- `10_Sources/Videos/{video_id} - {safe_title}/index.md`
+- `10_Sources/Videos/{video_id} - {safe_title}/storyline.md`
+- `10_Sources/Videos/{video_id} - {safe_title}/evidence.md`
+- `10_Sources/Videos/{video_id} - {safe_title}/qa.md`
+- `10_Sources/Videos/{video_id} - {safe_title}/updates.md`
+- `40_MOCs/Video Index.md`
 
 未配置 vault 时跳过导出，不阻塞主流程。
 
@@ -245,7 +277,7 @@ py -3.11 -m app.cli mempalace-search "agent memory"
 
 ---
 
-## Artifacts & data layout
+## 产物与数据目录
 
 处理产物默认位于：
 
@@ -266,7 +298,7 @@ data/videos/{video_id}/
 
 ---
 
-## Throughput, retries & resume
+## 限流、重试与断点续跑
 
 对外部依赖的请求（LLM、VLM、Embedding、yt-dlp、云 ASR 等）由调度参数限制并发与最小间隔，可在 `.env` 中调节，例如：
 
@@ -297,7 +329,7 @@ py -3.11 -m app.cli process --url "<video_url>" --no-resume
 
 ---
 
-## Verification & diagnostics
+## 验证与诊断
 
 | 目的 | 命令 |
 |------|------|
@@ -309,7 +341,24 @@ py -3.11 -m app.cli process --url "<video_url>" --no-resume
 
 ---
 
-## Development
+## 评测
+
+项目提供可执行评测入口，用于检查检索命中、引用有效性和证据不足时的拒答行为。回归测试通过不代表公开视频基准上的准确率，模型效果需要在标注数据集上单独测量。
+
+评测覆盖检索命中率、MRR、片段精确率/召回率、时间范围 IoU、引用有效性和拒答准确率，详见 [评测设计](docs/evaluation.md)。
+
+证据选择器中的 DPP 是项目命名：当前实现使用相关性、余弦相似度惩罚和模态奖励进行贪心选择，不是严格的行列式概率采样，也不承担事实真伪验证。
+
+```powershell
+py -3.11 -m app.cli eval --dataset data\eval\cases.jsonl --top-k 5 --output data\eval\report.json
+py -3.11 -m app.cli eval --dataset data\eval\cases.jsonl --run-answers --fail-on-threshold
+```
+
+评测 schema、指标、推荐开源基准（VideoRAG/LongerVideos、EgoSchema、ActivityNet-QA、NExT-QA、TVSum/SumMe）和改进路线见 **`docs/evaluation.md`**。
+
+---
+
+## 开发与测试
 
 ```powershell
 py -3.11 -m pytest
@@ -319,7 +368,7 @@ py -3.11 -m pytest
 
 ---
 
-## Limitations
+## 当前限制
 
 - **平台与站点策略**：下载成功率依赖 yt-dlp 与各站点策略变更。
 - **ffmpeg**：真实 URL 与转码路径依赖本机 ffmpeg 可用。
@@ -330,9 +379,9 @@ py -3.11 -m pytest
 
 ---
 
-## Repository layout
+## 仓库结构
 
-| Path | Role |
+| 路径 | 职责 |
 |------|------|
 | `app/` | 主包：配置、管线、检索、推理、UI、API、vision、storage 等 |
 | `src/` | `python -m src.cli` 入口封装，转发至 `app.cli` |
@@ -343,6 +392,6 @@ py -3.11 -m pytest
 
 ---
 
-## Version
+## 版本
 
 当前包版本见 `pyproject.toml` 中 `version`（例如 `0.1.0`）。
