@@ -87,6 +87,45 @@ def test_load_latest_completed_restores_disk_context(tmp_path: Path):
     assert result.processing_state["stages"]["pipeline"]["status"] == "succeeded"
 
 
+def test_load_completed_restores_requested_video_only(tmp_path: Path):
+    settings = Settings(_env_file=None, DATA_DIR=str(tmp_path / "data"))
+    for video_id, title, status in [
+        ("requested", "Requested video", "succeeded"),
+        ("unfinished", "Unfinished video", "running"),
+    ]:
+        video_dir = settings.videos_dir / video_id
+        video_dir.mkdir(parents=True)
+        metadata = VideoMetadata(video_id=video_id, title=title, duration=120)
+        summary = SummaryReport(
+            video_id=video_id,
+            quick_overview=[title],
+            structured_outline=[],
+            deep_analysis=[],
+            action_items=[],
+            important_quotes=[],
+            open_questions=[],
+            modality_note="text",
+        )
+        storyline = Storyline(video_id=video_id, query="q", nodes=[])
+        (video_dir / "metadata.json").write_text(metadata.model_dump_json(), encoding="utf-8")
+        (video_dir / "summary.json").write_text(summary.model_dump_json(), encoding="utf-8")
+        (video_dir / "storyline.json").write_text(storyline.model_dump_json(), encoding="utf-8")
+        (video_dir / "processing_state.json").write_text(
+            json.dumps({"stages": {"pipeline": {"status": status}}}),
+            encoding="utf-8",
+        )
+
+    service = VideoService(settings)
+
+    result = service.load_completed("requested")
+    assert result is not None
+    assert result.video_id == "requested"
+    assert result.metadata.title == "Requested video"
+    assert service.load_completed("unfinished") is None
+    assert service.load_completed("missing") is None
+    assert service.load_completed("../requested") is None
+
+
 def test_outline_timestamp_is_shown_as_evidence_range():
     summary = SummaryReport(
         video_id="v1",

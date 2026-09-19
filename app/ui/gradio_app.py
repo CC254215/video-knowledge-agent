@@ -8,6 +8,8 @@ from functools import partial
 from html import escape
 from typing import Any
 
+import gradio as gr
+
 from app.services.aggregation_service import AggregationService
 from app.services.chat_service import ChatAnswerResult, ChatService
 from app.services.streaming_video_service import StreamingVideoService, parse_url_lines
@@ -282,7 +284,70 @@ def build_app(debug: bool = False):
             outputs=[state, chatbot, evidence_box, evidence_gallery, suggested_questions_box, diagnostics_box, debug_box],
         )
 
+        def restore_history(request: gr.Request):
+            return _restore_history_from_query(video_service, request)
+
+        demo.load(
+            fn=restore_history,
+            inputs=None,
+            outputs=[
+                state,
+                progress_bar,
+                status_box,
+                summary_box,
+                storyline_box,
+                suggested_questions_box,
+                chatbot,
+                evidence_box,
+                evidence_gallery,
+                diagnostics_box,
+                debug_box,
+            ],
+        )
+
     return demo
+
+
+def _restore_history_from_query(service: VideoService, request: gr.Request):
+    """Allow shareable demo/history tabs without changing the processing pipeline."""
+    query_params = getattr(request, "query_params", {}) or {}
+    video_id = str(query_params.get("video_id") or "").strip()
+    result = service.load_completed(video_id) if video_id else None
+    if not result:
+        return (
+            AppState(),
+            _progress_html(0, "等待输入"),
+            format_status_for_ui(None),
+            format_summary_for_ui(None),
+            format_storyline_for_ui(None),
+            format_suggested_questions_for_ui(None),
+            [],
+            "<div class='empty-card'>输入有效的 video_id 后可加载历史处理结果。</div>",
+            [],
+            {"history_video_id": video_id, "loaded": False},
+            {},
+        )
+    restored = AppState()
+    restored.load_video(
+        result.video_id or "",
+        metadata=result.metadata,
+        summary=result.summary,
+        storyline=result.storyline,
+        modality_profile=result.modality_profile,
+    )
+    return (
+        restored,
+        _progress_html(100, "已加载历史处理结果"),
+        format_status_for_ui(result),
+        format_summary_for_ui(result.summary),
+        format_storyline_for_ui(result.storyline),
+        format_suggested_questions_for_ui(result.summary),
+        [],
+        "<div class='empty-card'>历史视频已加载。提问后这里会显示本次回答引用的证据。</div>",
+        _gallery_from_result(result),
+        {"history_video_id": video_id, "loaded": True},
+        {},
+    )
 
 
 def _aggregate_current_video(service: AggregationService, app_state: AppState):

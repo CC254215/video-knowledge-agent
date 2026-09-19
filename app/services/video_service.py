@@ -12,6 +12,7 @@ from app import pipeline
 from app.models import ModalityProfile, MultimodalSegment, Storyline, SummaryReport, VideoMetadata
 
 SUPPORTED_UPLOAD_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm", ".mp3", ".wav", ".m4a"}
+VIDEO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _SOURCE_LOCKS: dict[str, threading.Lock] = {}
 _SOURCE_LOCKS_GUARD = threading.Lock()
 
@@ -98,6 +99,40 @@ class VideoService:
             except (OSError, ValueError, KeyError):
                 continue
         return None
+
+    def load_completed(self, video_id: str) -> ProcessVideoResult | None:
+        """Restore one completed video by id for history/demo views."""
+        video_id = (video_id or "").strip()
+        if not VIDEO_ID_PATTERN.fullmatch(video_id):
+            return None
+        state_path = self.settings.videos_dir / video_id / "processing_state.json"
+        if not state_path.exists():
+            return None
+        try:
+            processing_state = json.loads(state_path.read_text(encoding="utf-8"))
+            if processing_state.get("stages", {}).get("pipeline", {}).get("status") != "succeeded":
+                return None
+            video_dir = state_path.parent
+            metadata = pipeline.read_metadata(video_id, self.settings)
+            summary = SummaryReport.model_validate_json((video_dir / "summary.json").read_text(encoding="utf-8"))
+            storyline = pipeline.load_storyline(video_dir / "storyline.json")
+            multimodal_path = video_dir / "multimodal_segments.json"
+            multimodal_segments = pipeline.load_multimodal_segments(multimodal_path) if multimodal_path.exists() else []
+            _apply_outline_time_ranges(summary, multimodal_segments)
+            return ProcessVideoResult(
+                success=True,
+                video_id=video_id,
+                metadata=metadata,
+                summary=summary,
+                storyline=storyline,
+                modality_profile=self._read_modality(video_id),
+                suggested_questions=summary.open_questions,
+                obsidian_status="已从历史处理结果加载视频上下文。",
+                multimodal_segments=multimodal_segments,
+                processing_state=processing_state,
+            )
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            return None
 
     def copy_upload_to_data(self, uploaded_file_path: str) -> Path:
         source = Path(uploaded_file_path)
